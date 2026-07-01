@@ -10,6 +10,7 @@
     "test": "node test/run.mjs"
   },
   "dependencies": {
+    "@clerk/backend": "^1.21.0",
     "express": "^4.18.2",
     "nanoid": "^3.3.7",
     "ws": "^8.16.0"

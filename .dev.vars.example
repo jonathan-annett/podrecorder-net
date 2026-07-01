@@ -1,0 +1,10 @@
+# Copy to `.dev.vars` for local `wrangler dev`. `.dev.vars` is gitignored.
+#
+# CI/dev-only bypass: any request carrying `X-Test-Entitle: <this value>` is
+# treated as Pro (entitles a room) without a real Clerk login. NEVER set this
+# in production — leave it unset there so the bypass is inert.
+TEST_ENTITLE_SECRET=test-entitle-secret
+
+# Optional: exercise the real Clerk path locally instead of the bypass.
+# CLERK_SECRET_KEY=sk_test_...
+# CLERK_PUBLISHABLE_KEY=pk_test_...

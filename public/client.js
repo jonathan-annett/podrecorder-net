@@ -458,7 +458,10 @@ function defaultIceServers() {
 
 async function getIceServers() {
   try {
-    const res = await fetch('/api/turn-credentials');
+    // Pass the room token so the Worker can resolve entitlement: an entitled
+    // (Pro) room gets real TURN; a free room transparently gets STUN-only.
+    const qs = roomToken ? `?token=${encodeURIComponent(roomToken)}` : '';
+    const res = await fetch(`/api/turn-credentials${qs}`);
     const { iceServers } = await res.json();
     if (Array.isArray(iceServers) && iceServers.length) return iceServers;
   } catch { /* fall through to STUN-only */ }
@@ -748,13 +751,136 @@ async function init() {
 }
 
 async function createRoom() {
-  const { token } = await fetch('/api/create-room').then(r => r.json());
+  const headers = {};
+  // If signed in with a Pro plan, authorize the new room so it unlocks TURN + R2.
+  // Free (signed-out) rooms are created STUN-only, pure P2P — no account needed.
+  try {
+    if (window.Clerk?.session) {
+      const jwt = await window.Clerk.session.getToken();
+      if (jwt) headers.Authorization = `Bearer ${jwt}`;
+    }
+  } catch { /* fall through — create a free room */ }
+
+  const { token } = await fetch('/api/create-room', { method: 'POST', headers })
+    .then(r => r.json());
   location.href = `/?token=${token}`;
+}
+
+// ─── Clerk auth + billing (Pro unlock) ────────────────────────────────────────
+// The free P2P tier needs no account — Clerk only gates the Pro TURN/R2 unlock.
+// If Clerk isn't configured (placeholder publishable key), the loader never sets
+// window.Clerk, this all no-ops, and the app stays free-tier only.
+function waitForClerk(timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    (function poll() {
+      if (window.Clerk) return resolve(window.Clerk);
+      if (Date.now() - start > timeoutMs) return resolve(null);
+      setTimeout(poll, 100);
+    })();
+  });
+}
+
+async function initClerk() {
+  // Only surface the auth/billing UI when the Worker says billing is enabled
+  // (BILLING_ENABLED=true). Defaults off, so a public deploy stays free-only and
+  // never shows a checkout that can't succeed until production billing is live.
+  let billingEnabled = false;
+  try {
+    const cfg = await fetch('/api/config').then((r) => r.json());
+    billingEnabled = !!cfg.billingEnabled;
+  } catch { /* default off — free tier only */ }
+  if (!billingEnabled) return;
+
+  const clerk = await waitForClerk();
+  if (!clerk) return; // not configured — free tier only
+  try {
+    await clerk.load();
+  } catch (e) {
+    console.warn('Clerk failed to load — staying free-tier', e);
+    return;
+  }
+  const account = document.getElementById('account');
+  if (account) account.classList.remove('hidden');
+
+  document.getElementById('btnSignIn')?.addEventListener('click',
+    () => clerk.openSignIn({ afterSignInUrl: location.href }));
+  document.getElementById('btnGoPro')?.addEventListener('click',
+    () => openGoPro(clerk));
+  document.getElementById('btnProClose')?.addEventListener('click',
+    () => closeGoPro(clerk));
+
+  renderClerk(clerk);
+  clerk.addListener(() => renderClerk(clerk));
+}
+
+function hasPro(clerk) {
+  try { return !!clerk.session?.checkAuthorization?.({ plan: 'pro' }); }
+  catch { return false; }
+}
+
+function renderClerk(clerk) {
+  const badge    = document.getElementById('planBadge');
+  const signIn   = document.getElementById('btnSignIn');
+  const goPro    = document.getElementById('btnGoPro');
+  const userBtn  = document.getElementById('userButton');
+  const signedIn = !!clerk.user;
+  const pro      = signedIn && hasPro(clerk);
+
+  if (signIn) signIn.classList.toggle('hidden', signedIn);
+  if (userBtn) {
+    userBtn.classList.toggle('hidden', !signedIn);
+    if (signedIn && !userBtn.dataset.mounted) {
+      clerk.mountUserButton(userBtn);
+      userBtn.dataset.mounted = '1';
+    }
+  }
+  if (badge) {
+    badge.classList.toggle('hidden', !signedIn);
+    badge.classList.toggle('pro', pro);
+    badge.textContent = pro ? 'Pro' : 'Free';
+  }
+  if (goPro) goPro.classList.toggle('hidden', pro); // already Pro → nothing to buy
+}
+
+function openGoPro(clerk) {
+  if (!clerk.user) {
+    clerk.openSignIn({ afterSignInUrl: location.href });
+    return;
+  }
+  // Show Clerk's PricingTable in an OPAQUE full-page view (#proModal) — not a
+  // translucent overlay. That way Clerk's checkout drawer (card entry) opens over a
+  // plain page, exactly like sign-in did, and can't be masked by a backdrop of ours.
+  const modal = document.getElementById('proModal');
+  const host  = document.getElementById('pricingHost');
+  if (!modal || !host || typeof clerk.mountPricingTable !== 'function') {
+    clerk.openUserProfile(); // fallback if this Clerk build lacks PricingTable
+    return;
+  }
+  host.replaceChildren();
+  modal.classList.remove('hidden');
+  try {
+    clerk.mountPricingTable(host);
+  } catch (e) {
+    console.warn('PricingTable mount failed', e);
+    modal.classList.add('hidden');
+    clerk.openUserProfile();
+  }
+}
+
+function closeGoPro(clerk) {
+  const modal = document.getElementById('proModal');
+  const host  = document.getElementById('pricingHost');
+  try { clerk.unmountPricingTable?.(host); } catch { /* ignore */ }
+  if (host) host.replaceChildren();
+  modal?.classList.add('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   if ('serviceWorker' in navigator)
     navigator.serviceWorker.register('/sw.js').catch(e => console.warn('SW register failed', e));
+
+  initClerk();
 
   document.getElementById('btnCreate').onclick   = createRoom;
   document.getElementById('btnJoin').onclick     = () => {

@@ -2,6 +2,15 @@
 # `credentialless` (vs require-corp) still yields crossOriginIsolated on
 # Chrome/Edge — the only browsers Whisper runs on — without forcing every
 # cross-origin resource (transformers.js CDN, HuggingFace weights) to send CORP.
-/*
+#
+# Scoped to the Whisper transcriber ONLY. Applying `COOP: same-origin` to the
+# lobby/room strips `window.opener`, which breaks Clerk's OAuth sign-in popups.
+# The lobby/room need no SharedArrayBuffer; only the Whisper transcriber does.
+# Both the pretty URL (/transcribe) and the raw asset (/transcribe.html) are
+# listed because the assets layer serves the extensionless path directly.
+/transcribe
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+/transcribe.html
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: credentialless

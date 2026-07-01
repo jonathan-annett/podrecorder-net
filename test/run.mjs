@@ -13,6 +13,18 @@ import WebSocket from 'ws';
 const BASE = process.env.BASE || 'http://localhost:8787';
 const WS_BASE = BASE.replace(/^http/, 'ws');
 
+// Must match TEST_ENTITLE_SECRET in .dev.vars (the CI/dev entitlement bypass).
+const ENTITLE_SECRET = process.env.TEST_ENTITLE_SECRET || 'test-entitle-secret';
+
+// Create a room already flipped to entitled (Pro) via the test bypass header.
+async function createEntitledRoom() {
+  const res = await fetch(`${BASE}/api/create-room`, {
+    method: 'POST',
+    headers: { 'X-Test-Entitle': ENTITLE_SECRET },
+  });
+  return (await res.json()).token;
+}
+
 let passed = 0;
 const failures = [];
 
@@ -301,8 +313,23 @@ await test('host can rejoin an occupied room and both sides get peer-joined agai
   await sleep(150);
 });
 
-await test('blob PUT then GET round-trips bytes through R2', async () => {
+await test('blob on a free room is gated with 402 Payment Required', async () => {
   const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const bytes = new Uint8Array([82, 73, 70, 70]); // "RIFF"
+  const put = await fetch(`${BASE}/api/blob/${t}/guest`, {
+    method: 'PUT',
+    headers: { 'content-type': 'audio/wav' },
+    body: bytes,
+  });
+  eq(put.status, 402, `free PUT should be 402, got ${put.status}`);
+  const get = await fetch(`${BASE}/api/blob/${t}/guest`);
+  eq(get.status, 402, `free GET should be 402, got ${get.status}`);
+  const del = await fetch(`${BASE}/api/blob/${t}/guest`, { method: 'DELETE' });
+  eq(del.status, 402, `free DELETE should be 402, got ${del.status}`);
+});
+
+await test('blob PUT then GET round-trips bytes through R2 on an entitled room', async () => {
+  const t = await createEntitledRoom();
   const bytes = new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4, 255, 0, 128]); // "RIFF"+
   const put = await fetch(`${BASE}/api/blob/${t}/guest`, {
     method: 'PUT',
@@ -323,12 +350,72 @@ await test('blob PUT then GET round-trips bytes through R2', async () => {
   eq(gone.status, 404, 'blob should be gone after DELETE');
 });
 
-await test('turn-credentials returns iceServers (STUN fallback when unconfigured)', async () => {
-  const res = await fetch(`${BASE}/api/turn-credentials`);
+await test('create-room with test-entitle header marks the room entitled', async () => {
+  const t = await createEntitledRoom();
+  const status = await (await fetch(`${BASE}/api/room/${t}`)).json();
+  eq(status.entitled, true, 'entitled room should report entitled:true');
+
+  const free = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const freeStatus = await (await fetch(`${BASE}/api/room/${free}`)).json();
+  eq(freeStatus.entitled, false, 'free room should report entitled:false');
+});
+
+await test('POST /api/room/:token/entitle upgrades a free room (402 without auth)', async () => {
+  const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+
+  const denied = await fetch(`${BASE}/api/room/${t}/entitle`, { method: 'POST' });
+  eq(denied.status, 402, `entitle without auth should be 402, got ${denied.status}`);
+
+  const before = await (await fetch(`${BASE}/api/room/${t}`)).json();
+  eq(before.entitled, false, 'room should start free');
+
+  const ok = await fetch(`${BASE}/api/room/${t}/entitle`, {
+    method: 'POST',
+    headers: { 'X-Test-Entitle': ENTITLE_SECRET },
+  });
+  eq(ok.status, 200, `entitle with bypass should be 200, got ${ok.status}`);
+
+  const after = await (await fetch(`${BASE}/api/room/${t}`)).json();
+  eq(after.entitled, true, 'room should be entitled after /entitle');
+
+  // Gate now open: blob PUT succeeds.
+  const put = await fetch(`${BASE}/api/blob/${t}/host`, {
+    method: 'PUT', headers: { 'content-type': 'audio/wav' }, body: new Uint8Array([1]),
+  });
+  eq(put.status, 200, `blob PUT after entitle should be 200, got ${put.status}`);
+  await fetch(`${BASE}/api/blob/${t}/host`, { method: 'DELETE' });
+});
+
+await test('turn-credentials: free room is STUN-only + entitled:false', async () => {
+  const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const res = await fetch(`${BASE}/api/turn-credentials?token=${t}`);
   eq(res.status, 200);
   const body = await res.json();
   assert(Array.isArray(body.iceServers), 'iceServers not an array');
   assert(body.iceServers.length >= 1, 'expected at least STUN');
+  eq(body.entitled, false, 'free room should be entitled:false');
+
+  // No token at all still returns a valid STUN list (never hard-fails).
+  const noTok = await (await fetch(`${BASE}/api/turn-credentials`)).json();
+  assert(Array.isArray(noTok.iceServers) && noTok.iceServers.length >= 1, 'STUN fallback');
+  eq(noTok.entitled, false, 'no-token should be entitled:false');
+});
+
+await test('turn-credentials: entitled room reports entitled:true', async () => {
+  const t = await createEntitledRoom();
+  const res = await fetch(`${BASE}/api/turn-credentials?token=${t}`);
+  eq(res.status, 200);
+  const body = await res.json();
+  assert(Array.isArray(body.iceServers), 'iceServers not an array');
+  eq(body.entitled, true, 'entitled room should be entitled:true');
+});
+
+await test('config exposes billingEnabled (true with BILLING_ENABLED in .dev.vars)', async () => {
+  const res = await fetch(`${BASE}/api/config`);
+  eq(res.status, 200);
+  const body = await res.json();
+  eq(typeof body.billingEnabled, 'boolean', 'billingEnabled should be a boolean');
+  eq(body.billingEnabled, true, 'expected true from BILLING_ENABLED=true in .dev.vars');
 });
 
 // ── Summary ──

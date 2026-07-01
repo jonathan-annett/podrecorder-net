@@ -11,6 +11,8 @@
 // TLS, cert watching, and HTTP→HTTPS redirect from server.js are gone — the edge
 // terminates TLS.
 
+import { createClerkClient } from '@clerk/backend';
+
 const TOKEN_ALPHABET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'; // 64 chars
 const TOKEN_LEN = 12;
@@ -39,6 +41,45 @@ function withIsolation(res) {
   return new Response(res.body, { status: res.status, headers: h });
 }
 
+// ── Entitlement (Clerk Billing) ──────────────────────────────────────────────
+// TURN + R2 are Pro-only. This resolves whether the *caller* is entitled to
+// create an entitled room. Returns a userId string when entitled, else null.
+//   • CI bypass: `X-Test-Entitle: <TEST_ENTITLE_SECRET>` — only honored when the
+//     secret is set (never in prod, where it is unset).
+//   • Otherwise verify the Clerk session JWT and check the `pro` plan via has().
+async function requirePro(request, env) {
+  const testHeader = request.headers.get('X-Test-Entitle');
+  if (env.TEST_ENTITLE_SECRET && testHeader === env.TEST_ENTITLE_SECRET) {
+    return 'test-user';
+  }
+  if (!env.CLERK_SECRET_KEY) return null;
+  try {
+    const clerk = createClerkClient({
+      secretKey: env.CLERK_SECRET_KEY,
+      publishableKey: env.CLERK_PUBLISHABLE_KEY,
+    });
+    const state = await clerk.authenticateRequest(request);
+    const auth = state.toAuth();
+    if (auth?.userId && auth.has({ plan: 'pro' })) return auth.userId;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Read the entitlement flag a room's Durable Object has stored.
+async function roomEntitled(env, token) {
+  if (!token) return false;
+  try {
+    const stub = env.ROOMS.get(env.ROOMS.idFromName(token));
+    const res = await stub.fetch('https://room/status');
+    const status = await res.json();
+    return status.entitled === true;
+  } catch {
+    return false;
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -52,27 +93,62 @@ export default {
       return stub.fetch(request);
     }
 
+    // Client-visible config: is the auth/billing UI enabled? Defaults OFF so a
+    // public deploy stays free-only (no payment surface) until production billing
+    // is live — visitors never hit a checkout that can't succeed (dev/test Stripe
+    // rejects real cards). Enforcement of Pro is separate (requirePro); this only
+    // controls whether the sign-in / Go Pro UI renders.
+    if (pathname === '/api/config') {
+      return json({ billingEnabled: env.BILLING_ENABLED === 'true' });
+    }
+
     // ── Room lifecycle API ──
     if (pathname === '/api/create-room') {
       const token = genToken();
+      const owner = await requirePro(request, env);
       const stub = env.ROOMS.get(env.ROOMS.idFromName(token));
-      await stub.fetch('https://room/create');
-      return json({ token });
+      await stub.fetch('https://room/create', {
+        method: 'POST',
+        body: JSON.stringify({ entitled: !!owner, ownerId: owner }),
+      });
+      return json({ token, entitled: !!owner });
     }
 
     if (pathname.startsWith('/api/room/')) {
-      const token = decodeURIComponent(pathname.slice('/api/room/'.length));
-      if (!token) return json({ error: 'Room not found' }, 404);
+      const rest = decodeURIComponent(pathname.slice('/api/room/'.length));
+      if (!rest) return json({ error: 'Room not found' }, 404);
+
+      // POST /api/room/:token/entitle — flip a room to entitled once the host
+      // proves Pro (covers signing in *after* landing on the room).
+      if (rest.endsWith('/entitle')) {
+        const token = rest.slice(0, -'/entitle'.length);
+        if (!token) return json({ error: 'Room not found' }, 404);
+        const owner = await requirePro(request, env);
+        if (!owner) return json({ error: 'Payment required' }, 402);
+        const stub = env.ROOMS.get(env.ROOMS.idFromName(token));
+        await stub.fetch('https://room/entitle', {
+          method: 'POST',
+          body: JSON.stringify({ ownerId: owner }),
+        });
+        return json({ entitled: true });
+      }
+
+      const token = rest;
       const stub = env.ROOMS.get(env.ROOMS.idFromName(token));
       const res = await stub.fetch('https://room/status');
       const status = await res.json();
       if (!status.exists) return json({ error: 'Room not found' }, 404);
-      return json({ exists: true, full: status.full });
+      return json({ exists: true, full: status.full, entitled: !!status.entitled });
     }
 
-    // ── Short-lived TURN credentials ──
+    // ── Short-lived TURN credentials (Pro rooms only; else STUN-only) ──
     if (pathname === '/api/turn-credentials') {
-      return json(await turnCredentials(env));
+      const token = url.searchParams.get('token');
+      const entitled = await roomEntitled(env, token);
+      const creds = entitled
+        ? await turnCredentials(env)
+        : { iceServers: [STUN_SERVERS] };
+      return json({ ...creds, entitled });
     }
 
     // ── R2 recording fallback:  /api/blob/:token/:role ──
@@ -94,13 +170,15 @@ export default {
 };
 
 // ── TURN credential minting (Cloudflare Realtime) ─────────────────────────────
+const STUN_SERVERS = {
+  urls: [
+    'stun:stun.l.google.com:19302',
+    'stun:stun1.l.google.com:19302',
+  ],
+};
+
 async function turnCredentials(env) {
-  const stun = {
-    urls: [
-      'stun:stun.l.google.com:19302',
-      'stun:stun1.l.google.com:19302',
-    ],
-  };
+  const stun = STUN_SERVERS;
   if (!env.TURN_TOKEN_ID || !env.TURN_API_TOKEN) {
     return { iceServers: [stun] };
   }
@@ -132,6 +210,11 @@ async function handleBlob(request, env, url) {
   const token = parts[2];
   const role = parts[3];
   if (!token || !role) return new Response('bad path', { status: 400 });
+
+  // The R2 fallback is Pro-only — the whole room is gated on entitlement.
+  if (!(await roomEntitled(env, token))) {
+    return json({ error: 'Payment required' }, 402);
+  }
   const key = `${token}/${role}`;
 
   switch (request.method) {
@@ -172,19 +255,42 @@ export class Room {
     this.env = env;
   }
 
+  // Safely parse an optional JSON body from an internal room request.
+  async readJson(request) {
+    try {
+      const text = await request.text();
+      return text ? JSON.parse(text) : {};
+    } catch {
+      return {};
+    }
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
 
     if (url.pathname === '/create') {
       await this.ctx.storage.put('created', Date.now());
       await this.ctx.storage.setAlarm(Date.now() + ROOM_TTL_MS);
+      const body = await this.readJson(request);
+      if (body.entitled) {
+        await this.ctx.storage.put('entitled', true);
+        if (body.ownerId) await this.ctx.storage.put('ownerId', body.ownerId);
+      }
+      return new Response('ok');
+    }
+
+    if (url.pathname === '/entitle') {
+      const body = await this.readJson(request);
+      await this.ctx.storage.put('entitled', true);
+      if (body.ownerId) await this.ctx.storage.put('ownerId', body.ownerId);
       return new Response('ok');
     }
 
     if (url.pathname === '/status') {
       const created = await this.ctx.storage.get('created');
+      const entitled = (await this.ctx.storage.get('entitled')) === true;
       const count = this.ctx.getWebSockets().length;
-      return Response.json({ exists: created != null, full: count >= 2 });
+      return Response.json({ exists: created != null, full: count >= 2, entitled });
     }
 
     if (request.headers.get('Upgrade') === 'websocket') {

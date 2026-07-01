@@ -39,6 +39,39 @@ the "why", but read it through the migration notes above.
 
 ---
 
+## ⚠️ Update: Pro paywall on TURN + R2 (Clerk auth + Clerk Billing)
+
+The two server-cost paths — **TURN relay** (`/api/turn-credentials`) and the **R2
+recording fallback** (`/api/blob/...`) — are now **Pro-only**. The free tier is
+unchanged, pure P2P (STUN), and **needs no account**.
+
+- **Entitlement is per-room.** The host proves Pro once; the `Room` Durable Object
+  stores `entitled=true` (+ `ownerId`) and the account-less guest inherits it for
+  that session. State lives in the DO and in Clerk Billing — **no database, no
+  Stripe↔user table, no webhook**.
+- **Auth:** Clerk. The Worker verifies the session JWT with `@clerk/backend` and
+  checks `has({ plan: 'pro' })` in `requirePro()` (`src/worker.js`). The client
+  loads `@clerk/clerk-js` from the Clerk CDN in `index.html` (placeholder key +
+  host — fill in per instance; if left as placeholders the app stays free-tier).
+- **Endpoints:** `POST /api/create-room` reads a `Bearer` JWT and creates the room
+  entitled when Pro. `POST /api/room/:token/entitle` upgrades a room after the host
+  signs in later. `/api/turn-credentials?token=…` returns real TURN when the room is
+  entitled, else STUN-only (`entitled` flag in the JSON). `/api/blob/...` returns
+  **402** for un-entitled rooms (all methods).
+- **Graceful degrade:** un-entitled = free = STUN + P2P data channel. `getIceServers()`
+  already falls back to STUN and the R2 helpers are wrapped in try/catch, so a free
+  room silently becomes pure P2P — no special-casing, no crashes.
+- **COOP/COEP scoped to the transcriber.** `public/_headers` now applies the
+  isolation headers to `/transcribe` + `/transcribe.html` only (was `/*`).
+  `COOP: same-origin` strips `window.opener` and breaks Clerk's OAuth popup; only
+  Whisper needs SharedArrayBuffer.
+- **Secrets:** `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY` (wrangler secrets), and a
+  **CI/dev-only** `TEST_ENTITLE_SECRET` — an `X-Test-Entitle` header matching it
+  flips a room to entitled without a real login (inert in prod, where it's unset).
+  `test/run.mjs` uses it to exercise both branches; `.dev.vars.example` documents it.
+
+---
+
 ## What this project is
 
 A self-hosted, two-person podcast recording studio that runs as a Node.js server.
@@ -1009,6 +1042,46 @@ backend, so this is a version bump, not a flag.
 
 Self-contained to `transcribe.html` (plus the CDN import URL). Pairs naturally
 with the mobile-UX pass, since WebGPU is what makes phone transcription usable.
+
+---
+
+## Roadmap: Free-account tier (frictionless upsell)
+
+### Motivation
+
+Today there are effectively two states: **anonymous** (no account) and **Pro**
+(subscribed). Signing in without subscribing behaves identically to anonymous.
+Introduce a **middle tier** — *signed-in but free* — that grants perks valuable
+enough to get users to create an account **before** they need Pro, so the eventual
+upgrade is one click (no account creation in the critical moment).
+
+Design rule: free-account perks must cost us ~nothing — **no TURN egress, no R2**
+— so they can't be the gated resources. They should be things that only make sense
+with an identity.
+
+### Perks (cheap for us; account-only by nature)
+
+- **Identity in the room** — display name / avatar from the Clerk profile, so the
+  peer sees "Jordan" instead of "guest". Stored in **Clerk user metadata** (free).
+- **Saved preferences** — remembered mic/output device, VOX threshold, keep-local
+  default — synced via Clerk user metadata; no per-session re-pick.
+- **Reusable / vanity room link** — a stable `/r/<slug>` the user owns vs a random
+  throwaway token (inherently account-gated). Needs a small KV/DO slug→token map.
+- **Longer room TTL** — anonymous rooms expire in 24h; signed-in free could hold ~7d.
+- **Session history (metadata only)** — list of past sessions (date, participants,
+  duration), *not* the audio. Pairs with the IndexedDB session-store roadmap.
+- **Soft usage limits as the upsell lever** — lightly cap anonymous (session length
+  or rooms/day); signed-in free is more generous; Pro removes limits.
+
+### Implementation notes
+
+- Adds a lighter **`requireSignedIn(request, env)`** alongside `requirePro()` in
+  `src/worker.js` (verify the Clerk JWT, skip the plan check). Free-account features
+  gate on signed-in; TURN/R2 stay gated on `has({ plan: 'pro' })`.
+- Prefer **Clerk user metadata** (`publicMetadata`/`unsafeMetadata`) for prefs +
+  identity — free, no new binding. Add a tiny **KV** only for vanity slugs / history.
+- **Anonymous stays fully zero-storage**, preserving the "no account needed, nothing
+  stored" promise for people who never sign in.
 
 ---
 

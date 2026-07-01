@@ -35,3 +35,21 @@ bucket_name = "podcast-studio-recordings"
 #   wrangler secret put TURN_TOKEN_ID
 #   wrangler secret put TURN_API_TOKEN
 # If unset, the endpoint gracefully returns STUN-only ICE servers.
+
+# Clerk (auth + billing). TURN + R2 are gated on a Pro subscription, verified
+# server-side by @clerk/backend. Provide as secrets (never commit):
+#   wrangler secret put CLERK_SECRET_KEY
+#   wrangler secret put CLERK_PUBLISHABLE_KEY   # public, but kept with the pair
+# One-time dashboard setup: enable social logins, create the `pro` plan, connect
+# Stripe. If CLERK_SECRET_KEY is unset, requirePro() returns null → all rooms are
+# free (STUN-only, R2 → 402), so the app degrades to pure P2P.
+#
+# CI/dev only — a shared secret that flips a room to entitled without a real
+# login (see requirePro / test/run.mjs). NEVER set this in production.
+#   wrangler secret put TEST_ENTITLE_SECRET      # or set in .dev.vars for `wrangler dev`
+#
+# BILLING_ENABLED — gates whether the client renders the auth/billing (sign-in /
+# Go Pro) UI at all. Defaults OFF: a public deploy stays free-only with no payment
+# surface, so visitors never hit a checkout that can't succeed. Set to "true" only
+# once PRODUCTION billing is live (prod Clerk pk_live_/sk_live_ + real Stripe):
+#   wrangler secret put BILLING_ENABLED          # value: true   (and in .dev.vars for local)
