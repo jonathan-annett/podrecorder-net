@@ -244,9 +244,16 @@
       border-radius: 20px;
       border: 1px solid var(--border);
     }
-    #status.waiting   { color: var(--warn);    border-color: var(--warn);    background: rgba(255,179,71,.06); }
-    #status.connected { color: var(--success);  border-color: var(--success); background: rgba(71,255,180,.06); }
-    #status.error     { color: var(--accent2); border-color: var(--accent2); background: rgba(255,71,87,.06); }
+    #status.waiting      { color: var(--warn);    border-color: var(--warn);    background: rgba(255,179,71,.06); }
+    #status.connected    { color: var(--success);  border-color: var(--success); background: rgba(71,255,180,.06); }
+    #status.error        { color: var(--accent2); border-color: var(--accent2); background: rgba(255,71,87,.06); }
+    /* Connection-type coding: green=direct, cyan=TURN relay, blue=server relay,
+       orange=connecting, red=disconnected. */
+    #status.connecting   { color: var(--warn);    border-color: var(--warn);    background: rgba(255,179,71,.06); }
+    #status.direct       { color: var(--success); border-color: var(--success); background: rgba(71,255,180,.08); }
+    #status.relay        { color: #3fd8ff;        border-color: #3fd8ff;        background: rgba(63,216,255,.08); }
+    #status.serverrelay  { color: #6a9cff;        border-color: #6a9cff;        background: rgba(106,156,255,.10); }
+    #status.disconnected { color: var(--accent2); border-color: var(--accent2); background: rgba(255,71,87,.06); }
 
     /* Share bar */
     .share-bar {

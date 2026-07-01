@@ -274,6 +274,7 @@ export class Room {
       const body = await this.readJson(request);
       if (body.entitled) {
         await this.ctx.storage.put('entitled', true);
+        this.entitled = true;
         if (body.ownerId) await this.ctx.storage.put('ownerId', body.ownerId);
       }
       return new Response('ok');
@@ -282,6 +283,7 @@ export class Room {
     if (url.pathname === '/entitle') {
       const body = await this.readJson(request);
       await this.ctx.storage.put('entitled', true);
+      this.entitled = true;
       if (body.ownerId) await this.ctx.storage.put('ownerId', body.ownerId);
       return new Response('ok');
     }
@@ -344,16 +346,29 @@ export class Room {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(ws, message) {
-    if (typeof message !== 'string') return; // control JSON only; media is P2P
+  async webSocketMessage(ws, message) {
+    const att = ws.deserializeAttachment() || {};
+    const role = att.role;
+
+    // Binary frame → live media relay fallback (WebRTC blocked). Forward the raw
+    // frame to the peer, but ONLY for entitled (Pro) rooms — free rooms get no
+    // server relay. Cache the entitled flag so we don't hit storage per frame.
+    if (typeof message !== 'string') {
+      if (this.entitled === undefined) {
+        this.entitled = (await this.ctx.storage.get('entitled')) === true;
+      }
+      if (!this.entitled) return;
+      const peer = this.ctx.getWebSockets(role === 'host' ? 'guest' : 'host')[0];
+      if (peer && peer.readyState === 1) peer.send(message);
+      return;
+    }
+
     let msg;
     try {
       msg = JSON.parse(message);
     } catch {
       return;
     }
-    const att = ws.deserializeAttachment() || {};
-    const role = att.role;
 
     switch (msg.type) {
       case 'ping':
