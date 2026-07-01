@@ -1,4 +1,4 @@
-# 🎙 Podcast Studio
+# 🎙 podrecorder.net
 
 A two-person, peer-to-peer podcast recording studio that runs on **Cloudflare
 Workers**. Each speaker records locally in high quality; audio flows directly

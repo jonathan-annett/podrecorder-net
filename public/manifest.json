@@ -1,6 +1,6 @@
 {
-  "name": "Podcast Studio",
-  "short_name": "PodStudio",
+  "name": "podrecorder.net",
+  "short_name": "podrecorder",
   "description": "Two-person P2P podcast recording studio — audio stays on your machine.",
   "start_url": "/",
   "scope": "/",

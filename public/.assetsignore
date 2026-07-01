@@ -3,3 +3,7 @@
 **/.DS_Store
 # Scratch source used to clip the app icons — not needed at runtime.
 images/icon.png
+# Full-res splash originals — the landing serves images/podrecorder-splash.png
+# (an optimized derivative). Originals kept in the repo as source only.
+images/podrecorder-dark.png
+images/podrecorder.png

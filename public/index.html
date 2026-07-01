@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Podcast Studio</title>
+  <title>podrecorder.net</title>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#0c0c0e">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -98,6 +98,11 @@
       font-style: normal;
       color: var(--accent);
       display: block;
+    }
+    #splash {
+      width: min(520px, 82vw);
+      height: auto;
+      margin-bottom: 16px;
     }
     #lobby p {
       color: var(--muted);
@@ -339,12 +344,12 @@
   </style>
 </head>
 <body>
-  <div class="wordmark">STUDIO<span>.P2P</span></div>
+  <div class="wordmark">podrecorder<span>.net</span></div>
   <div id="rtt"></div>
 
   <!-- ── Lobby ── -->
   <div id="lobby" class="hidden">
-    <h1>Podcast<em>Studio</em></h1>
+    <img id="splash" src="/images/podrecorder-splash.png" alt="podrecorder.net">
     <p>End-to-end encrypted · Audio stays on your machine · No accounts</p>
     <div class="lobby-actions">
       <button class="btn-primary" id="btnCreate">＋ Create Room</button>
