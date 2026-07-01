@@ -974,6 +974,44 @@ transcribe/stitch; the folder handle is the optional durable on-disk copy.
 
 ---
 
+## Roadmap: WebGPU transcription (WASM fallback)
+
+### Motivation
+
+`/transcribe` currently runs Whisper on **WebAssembly** via
+`@xenova/transformers@2.17.2` (ONNX Runtime Web, multi-threaded WASM + SIMD —
+CPU-bound). **WebGPU** typically runs Whisper **10–50× faster** and is what makes
+on-device transcription practical on **mobile**. v2.17.2 has no production WebGPU
+backend, so this is a version bump, not a flag.
+
+### Plan
+
+- **Upgrade the library** from `@xenova/transformers@2.x` to **transformers.js v3
+  (`@huggingface/transformers`)**, which has a first-class WebGPU backend. (API is
+  largely compatible; verify the `pipeline` + `env` calls in `transcribe.html`.)
+- **Select the backend at runtime with a fallback:**
+  ```js
+  const hasWebGPU = 'gpu' in navigator && !!(await navigator.gpu?.requestAdapter());
+  const transcriber = await pipeline('automatic-speech-recognition', model, {
+    device: hasWebGPU ? 'webgpu' : 'wasm',
+    dtype:  hasWebGPU ? 'q4' : 'q8',   // quantized weights; tune per model/quality
+  });
+  ```
+  Surface which path was chosen in the UI (WebGPU vs WASM) so slow runs are
+  explainable.
+- **Keep the WASM path fully working** — Firefox and older Safari lack WebGPU, and
+  the app already supports WASM. Retain `COOP/COEP` so the WASM fallback stays
+  multi-threaded.
+- **Re-check cross-origin isolation** — WebGPU itself doesn't need SharedArrayBuffer,
+  but the WASM fallback does; `credentialless` already covers both.
+- **Note on model/dtype:** WebGPU favours `fp16`/`q4`; validate transcript quality
+  vs. the current WASM output on the `tiny`/`base` models before defaulting.
+
+Self-contained to `transcribe.html` (plus the CDN import URL). Pairs naturally
+with the mobile-UX pass, since WebGPU is what makes phone transcription usable.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Description |
