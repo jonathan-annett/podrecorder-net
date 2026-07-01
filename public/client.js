@@ -982,6 +982,20 @@ async function initClerk() {
 
   renderClerk(clerk);
   clerk.addListener(() => renderClerk(clerk));
+
+  // The plan/entitlement lives in the session token's claims, which lag a billing
+  // change — so after closing the account/checkout UI the badge can be stale until
+  // a reload. Self-heal: force a fresh token (which updates the claims) and
+  // re-render on tab focus/visibility and a short interval.
+  const refreshEntitlement = async () => {
+    if (clerk.user) {
+      try { await clerk.session?.getToken({ skipCache: true }); } catch { /* keep cached */ }
+    }
+    renderClerk(clerk);
+  };
+  window.addEventListener('focus', refreshEntitlement);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshEntitlement(); });
+  setInterval(refreshEntitlement, 8000);
 }
 
 function hasPro(clerk) {
