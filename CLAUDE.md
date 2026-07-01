@@ -39,6 +39,39 @@ the "why", but read it through the migration notes above.
 
 ---
 
+## ⚠️ Update: Pro paywall on TURN + R2 (Clerk auth + Clerk Billing)
+
+The two server-cost paths — **TURN relay** (`/api/turn-credentials`) and the **R2
+recording fallback** (`/api/blob/...`) — are now **Pro-only**. The free tier is
+unchanged, pure P2P (STUN), and **needs no account**.
+
+- **Entitlement is per-room.** The host proves Pro once; the `Room` Durable Object
+  stores `entitled=true` (+ `ownerId`) and the account-less guest inherits it for
+  that session. State lives in the DO and in Clerk Billing — **no database, no
+  Stripe↔user table, no webhook**.
+- **Auth:** Clerk. The Worker verifies the session JWT with `@clerk/backend` and
+  checks `has({ plan: 'pro' })` in `requirePro()` (`src/worker.js`). The client
+  loads `@clerk/clerk-js` from the Clerk CDN in `index.html` (placeholder key +
+  host — fill in per instance; if left as placeholders the app stays free-tier).
+- **Endpoints:** `POST /api/create-room` reads a `Bearer` JWT and creates the room
+  entitled when Pro. `POST /api/room/:token/entitle` upgrades a room after the host
+  signs in later. `/api/turn-credentials?token=…` returns real TURN when the room is
+  entitled, else STUN-only (`entitled` flag in the JSON). `/api/blob/...` returns
+  **402** for un-entitled rooms (all methods).
+- **Graceful degrade:** un-entitled = free = STUN + P2P data channel. `getIceServers()`
+  already falls back to STUN and the R2 helpers are wrapped in try/catch, so a free
+  room silently becomes pure P2P — no special-casing, no crashes.
+- **COOP/COEP scoped to the transcriber.** `public/_headers` now applies the
+  isolation headers to `/transcribe` + `/transcribe.html` only (was `/*`).
+  `COOP: same-origin` strips `window.opener` and breaks Clerk's OAuth popup; only
+  Whisper needs SharedArrayBuffer.
+- **Secrets:** `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY` (wrangler secrets), and a
+  **CI/dev-only** `TEST_ENTITLE_SECRET` — an `X-Test-Entitle` header matching it
+  flips a room to entitled without a real login (inert in prod, where it's unset).
+  `test/run.mjs` uses it to exercise both branches; `.dev.vars.example` documents it.
+
+---
+
 ## What this project is
 
 A self-hosted, two-person podcast recording studio that runs as a Node.js server.

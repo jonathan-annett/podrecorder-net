@@ -110,6 +110,34 @@
       margin-bottom: 48px;
       font-size: 12px;
     }
+    .lobby-account {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+    .plan-badge {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .plan-badge.pro { color: var(--accent); border-color: var(--accent); }
+    .lobby-hint {
+      color: var(--muted);
+      text-align: center;
+      margin-top: 28px;
+      font-size: 11px;
+      line-height: 1.7;
+      max-width: 420px;
+    }
+    .lobby-hint strong { color: var(--accent); }
     .lobby-actions {
       display: flex;
       gap: 12px;
@@ -350,7 +378,17 @@
   <!-- ── Lobby ── -->
   <div id="lobby" class="hidden">
     <img id="splash" src="/images/podrecorder-splash.png" alt="podrecorder.net">
-    <p>End-to-end encrypted · Audio stays on your machine · No accounts</p>
+    <p>End-to-end encrypted · Audio stays on your machine · Free P2P needs no account</p>
+
+    <!-- Account / plan controls. Sign-in is only needed for Pro (TURN relay +
+         cloud recording backup); the free tier is pure peer-to-peer. -->
+    <div id="account" class="lobby-account hidden">
+      <span id="planBadge" class="plan-badge hidden"></span>
+      <div id="userButton"></div>
+      <button class="btn-ghost btn-sm" id="btnSignIn">Sign in</button>
+      <button class="btn-ghost btn-sm" id="btnGoPro">✦ Go Pro</button>
+    </div>
+
     <div class="lobby-actions">
       <button class="btn-primary" id="btnCreate">＋ Create Room</button>
     </div>
@@ -358,6 +396,10 @@
       <input id="joinCode" type="text" placeholder="Paste room code…" spellcheck="false">
       <button class="btn-ghost" id="btnJoin">Join →</button>
     </div>
+    <p class="lobby-hint">
+      Free rooms connect directly (peer-to-peer). <strong>Pro</strong> unlocks a
+      relay (TURN) for tricky networks and a cloud backup of the recording transfer.
+    </p>
   </div>
 
   <!-- ── Room ── -->
@@ -438,6 +480,20 @@
   </div>
 
   <audio id="remoteAudio" autoplay playsinline></audio>
+
+  <!-- Clerk (auth + billing). Loads only for the Pro sign-in / checkout flow;
+       the free P2P tier works with no account. Replace the publishable key AND
+       the script host below with your instance's values (the host is derived
+       from the publishable key — copy the <…>.clerk.accounts.dev domain from the
+       Clerk dashboard). If left as placeholders the loader fails silently and the
+       app stays free-tier only. -->
+  <script
+    async
+    crossorigin="anonymous"
+    data-clerk-publishable-key="CLERK_PUBLISHABLE_KEY"
+    src="https://CLERK_FRONTEND_API_HOST/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
+    type="text/javascript"
+  ></script>
 
   <script src="/vendor/simplepeer.min.js"></script>
   <script src="/client.js"></script>
