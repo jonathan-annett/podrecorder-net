@@ -2,6 +2,13 @@ name = "podcast-studio"
 main = "src/worker.js"
 compatibility_date = "2025-06-01"
 
+# Custom domain — Cloudflare provisions the DNS record + managed TLS cert.
+routes = [
+  { pattern = "podrecorder.net", custom_domain = true },
+]
+# Keep the *.workers.dev URL alive too (for testing alongside the custom domain).
+workers_dev = true
+
 # Static PWA assets (index.html, client.js, transcribe.html, sw.js, icons, _headers)
 [assets]
 directory = "./public"
