@@ -1045,6 +1045,46 @@ with the mobile-UX pass, since WebGPU is what makes phone transcription usable.
 
 ---
 
+## Roadmap: Free-account tier (frictionless upsell)
+
+### Motivation
+
+Today there are effectively two states: **anonymous** (no account) and **Pro**
+(subscribed). Signing in without subscribing behaves identically to anonymous.
+Introduce a **middle tier** — *signed-in but free* — that grants perks valuable
+enough to get users to create an account **before** they need Pro, so the eventual
+upgrade is one click (no account creation in the critical moment).
+
+Design rule: free-account perks must cost us ~nothing — **no TURN egress, no R2**
+— so they can't be the gated resources. They should be things that only make sense
+with an identity.
+
+### Perks (cheap for us; account-only by nature)
+
+- **Identity in the room** — display name / avatar from the Clerk profile, so the
+  peer sees "Jordan" instead of "guest". Stored in **Clerk user metadata** (free).
+- **Saved preferences** — remembered mic/output device, VOX threshold, keep-local
+  default — synced via Clerk user metadata; no per-session re-pick.
+- **Reusable / vanity room link** — a stable `/r/<slug>` the user owns vs a random
+  throwaway token (inherently account-gated). Needs a small KV/DO slug→token map.
+- **Longer room TTL** — anonymous rooms expire in 24h; signed-in free could hold ~7d.
+- **Session history (metadata only)** — list of past sessions (date, participants,
+  duration), *not* the audio. Pairs with the IndexedDB session-store roadmap.
+- **Soft usage limits as the upsell lever** — lightly cap anonymous (session length
+  or rooms/day); signed-in free is more generous; Pro removes limits.
+
+### Implementation notes
+
+- Adds a lighter **`requireSignedIn(request, env)`** alongside `requirePro()` in
+  `src/worker.js` (verify the Clerk JWT, skip the plan check). Free-account features
+  gate on signed-in; TURN/R2 stay gated on `has({ plan: 'pro' })`.
+- Prefer **Clerk user metadata** (`publicMetadata`/`unsafeMetadata`) for prefs +
+  identity — free, no new binding. Add a tiny **KV** only for vanity slugs / history.
+- **Anonymous stays fully zero-storage**, preserving the "no account needed, nothing
+  stored" promise for people who never sign in.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Description |

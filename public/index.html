@@ -138,6 +138,25 @@
       max-width: 420px;
     }
     .lobby-hint strong { color: var(--accent); }
+
+    /* ── Pro pricing view ──
+       Opaque, page-style panel (NOT a translucent overlay) so Clerk's checkout
+       drawer opens over a plain page and can't be masked by a backdrop. */
+    #proModal {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      background: var(--bg);
+      overflow: auto;
+      padding: 24px;
+    }
+    .pro-modal-bar {
+      display: flex;
+      justify-content: flex-start;
+      max-width: 960px;
+      margin: 0 auto 16px;
+    }
+    #pricingHost { max-width: 960px; margin: 0 auto; }
     .lobby-actions {
       display: flex;
       gap: 12px;
@@ -479,6 +498,15 @@
     </div>
   </div>
 
+  <!-- Pro pricing (Clerk PricingTable) — opaque page view, not a translucent
+       overlay, so Clerk's checkout drawer layers cleanly over it. -->
+  <div id="proModal" class="hidden">
+    <div class="pro-modal-bar">
+      <button class="btn-ghost btn-sm" id="btnProClose">← Back</button>
+    </div>
+    <div id="pricingHost"></div>
+  </div>
+
   <audio id="remoteAudio" autoplay playsinline></audio>
 
   <!-- Clerk (auth + billing). Loads only for the Pro sign-in / checkout flow;
@@ -490,8 +518,8 @@
   <script
     async
     crossorigin="anonymous"
-    data-clerk-publishable-key="CLERK_PUBLISHABLE_KEY"
-    src="https://CLERK_FRONTEND_API_HOST/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
+    data-clerk-publishable-key="pk_test_aG9uZXN0LWxlb3BhcmQtNzYuY2xlcmsuYWNjb3VudHMuZGV2JA"
+    src="https://honest-leopard-76.clerk.accounts.dev/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
     type="text/javascript"
   ></script>
 

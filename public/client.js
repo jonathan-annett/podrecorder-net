@@ -797,6 +797,8 @@ async function initClerk() {
     () => clerk.openSignIn({ afterSignInUrl: location.href }));
   document.getElementById('btnGoPro')?.addEventListener('click',
     () => openGoPro(clerk));
+  document.getElementById('btnProClose')?.addEventListener('click',
+    () => closeGoPro(clerk));
 
   renderClerk(clerk);
   clerk.addListener(() => renderClerk(clerk));
@@ -836,37 +838,32 @@ function openGoPro(clerk) {
     clerk.openSignIn({ afterSignInUrl: location.href });
     return;
   }
-  // Clerk Billing checkout. Prefer the PricingTable component; fall back to the
-  // billing tab of the user profile if this build doesn't expose it.
-  if (typeof clerk.mountPricingTable === 'function') {
-    showClerkOverlay((host) => clerk.mountPricingTable(host));
-  } else {
+  // Show Clerk's PricingTable in an OPAQUE full-page view (#proModal) — not a
+  // translucent overlay. That way Clerk's checkout drawer (card entry) opens over a
+  // plain page, exactly like sign-in did, and can't be masked by a backdrop of ours.
+  const modal = document.getElementById('proModal');
+  const host  = document.getElementById('pricingHost');
+  if (!modal || !host || typeof clerk.mountPricingTable !== 'function') {
+    clerk.openUserProfile(); // fallback if this Clerk build lacks PricingTable
+    return;
+  }
+  host.replaceChildren();
+  modal.classList.remove('hidden');
+  try {
+    clerk.mountPricingTable(host);
+  } catch (e) {
+    console.warn('PricingTable mount failed', e);
+    modal.classList.add('hidden');
     clerk.openUserProfile();
   }
 }
 
-// Minimal dimmed overlay used to host a Clerk component (e.g. the PricingTable).
-function showClerkOverlay(mount) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText =
-    'position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;' +
-    'align-items:center;justify-content:center;z-index:1000;padding:24px;';
-  const card = document.createElement('div');
-  card.style.cssText =
-    'background:var(--surface,#111);border-radius:8px;max-width:900px;width:100%;' +
-    'max-height:90vh;overflow:auto;position:relative;padding:16px;';
-  const close = document.createElement('button');
-  close.textContent = '✕';
-  close.style.cssText =
-    'position:absolute;top:8px;right:12px;background:none;border:none;' +
-    'color:#888;font-size:18px;cursor:pointer;z-index:1;';
-  const host = document.createElement('div');
-  close.onclick = () => overlay.remove();
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-  card.append(close, host);
-  overlay.append(card);
-  document.body.append(overlay);
-  try { mount(host); } catch (e) { console.warn('Clerk mount failed', e); overlay.remove(); }
+function closeGoPro(clerk) {
+  const modal = document.getElementById('proModal');
+  const host  = document.getElementById('pricingHost');
+  try { clerk.unmountPricingTable?.(host); } catch { /* ignore */ }
+  if (host) host.replaceChildren();
+  modal?.classList.add('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
