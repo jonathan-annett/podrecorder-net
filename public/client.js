@@ -1001,7 +1001,7 @@ async function initClerk() {
   let clerkModalWasOpen = false;
   new MutationObserver(() => {
     const open = clerkModalPresent();
-    if (clerkModalWasOpen && !open) refreshEntitlement();   // modal just closed
+    if (clerkModalWasOpen && !open) { refreshEntitlement(); hideBillingHint(); }  // modal closed
     clerkModalWasOpen = open;
   }).observe(document.body, { childList: true, subtree: true });
 
@@ -1050,6 +1050,20 @@ function openGoPro(clerk) {
   // checkout masked / non-interactive; Clerk's native modal layers correctly (it's
   // the flow that works for managing the subscription).
   clerk.openUserProfile();
+  showBillingHint();   // interim: point users at the Billing tab
+}
+
+let billingHintTimer = null;
+function showBillingHint() {
+  const el = document.getElementById('billingHint');
+  if (!el) return;
+  el.classList.remove('hidden');
+  clearTimeout(billingHintTimer);
+  billingHintTimer = setTimeout(hideBillingHint, 60000);  // safety auto-hide
+}
+function hideBillingHint() {
+  clearTimeout(billingHintTimer);
+  document.getElementById('billingHint')?.classList.add('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
