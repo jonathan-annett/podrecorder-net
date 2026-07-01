@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Podcast Studio</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0c0c0e">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/fonts/fonts.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0c0c0e;
+      --surface:   #141418;
+      --surface2:  #1c1c22;
+      --border:    #2a2a33;
+      --accent:    #e8ff47;
+      --accent2:   #ff4757;
+      --text:      #e8e8f0;
+      --muted:     #6b6b80;
+      --success:   #47ffb4;
+      --warn:      #ffb347;
+      --mono:      'Space Mono', monospace;
+      --sans:      'Syne', sans-serif;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── Scanline texture ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,.08) 2px,
+        rgba(0,0,0,.08) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ── Corner logo ── */
+    .wordmark {
+      position: fixed;
+      top: 24px;
+      left: 28px;
+      font-family: var(--sans);
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -.5px;
+      color: var(--accent);
+      z-index: 100;
+    }
+    .wordmark span { color: var(--muted); font-weight: 400; }
+
+    /* ── Status pill ── */
+    #rtt {
+      position: fixed;
+      top: 28px;
+      right: 28px;
+      font-size: 10px;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+
+    /* ── Lobby ── */
+    #lobby {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 0;
+    }
+    #lobby h1 {
+      font-family: var(--sans);
+      font-size: clamp(48px, 8vw, 96px);
+      font-weight: 800;
+      line-height: .9;
+      letter-spacing: -3px;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+    #lobby h1 em {
+      font-style: normal;
+      color: var(--accent);
+      display: block;
+    }
+    #lobby p {
+      color: var(--muted);
+      text-align: center;
+      margin-bottom: 48px;
+      font-size: 12px;
+    }
+    .lobby-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .lobby-join {
+      display: flex;
+      gap: 8px;
+      margin-top: 20px;
+      justify-content: center;
+    }
+    #joinCode {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      font-family: var(--mono);
+      font-size: 13px;
+      border-radius: 4px;
+      width: 160px;
+      outline: none;
+    }
+    #joinCode:focus { border-color: var(--accent); }
+
+    /* ── Device selectors ── */
+    .device-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .device-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .device-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      border-radius: 4px;
+      outline: none;
+      max-width: 220px;
+    }
+    .device-select:focus { border-color: var(--accent); }
+
+    /* ── Room UI ── */
+    #room {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+      gap: 0;
+    }
+
+    .room-header {
+      grid-column: 1 / -1;
+      padding: 80px 28px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+    .room-id {
+      font-family: var(--sans);
+      font-size: 24px;
+      font-weight: 800;
+    }
+    .room-id span {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--accent);
+      background: rgba(232,255,71,.08);
+      padding: 3px 8px;
+      border-radius: 3px;
+      border: 1px solid rgba(232,255,71,.2);
+    }
+    #status {
+      margin-left: auto;
+      font-size: 11px;
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+    }
+    #status.waiting   { color: var(--warn);    border-color: var(--warn);    background: rgba(255,179,71,.06); }
+    #status.connected { color: var(--success);  border-color: var(--success); background: rgba(71,255,180,.06); }
+    #status.error     { color: var(--accent2); border-color: var(--accent2); background: rgba(255,71,87,.06); }
+
+    /* Share bar */
+    .share-bar {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    #shareLink {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 7px 12px;
+      font-family: var(--mono);
+      font-size: 11px;
+      border-radius: 4px;
+      outline: none;
+      max-width: 420px;
+    }
+
+    /* Main pane */
+    .main-pane {
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      border-right: 1px solid var(--border);
+    }
+
+    /* Controls */
+    #controls { display: flex; flex-direction: column; gap: 12px; }
+    .btn-row   { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    /* Log */
+    #log {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 14px;
+      overflow-y: auto;
+      min-height: 200px;
+      max-height: 340px;
+      font-size: 11px;
+      line-height: 1.8;
+    }
+    #log .info    { color: var(--accent); }
+    #log .success { color: var(--success); }
+    #log .warn    { color: var(--warn); }
+    #log .error   { color: var(--accent2); }
+
+    /* VOX indicator */
+    #vox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    #vox .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background .1s;
+    }
+    #vox.active .dot { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+    #vox.active { color: var(--accent2); }
+
+    #transferProgress {
+      font-size: 11px;
+      color: var(--warn);
+      min-height: 16px;
+    }
+
+    /* Right sidebar */
+    .sidebar {
+      padding: 28px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .sidebar-section h3 {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    /* Buttons */
+    button {
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      padding: 9px 16px;
+      transition: all .15s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #0c0c0e;
+      font-weight: 700;
+    }
+    .btn-primary:hover { background: #d4eb30; }
+    .btn-primary:disabled { background: var(--border); color: var(--muted); cursor: default; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-ghost.active { border-color: var(--success); color: var(--success); }
+
+    .btn-danger {
+      background: transparent;
+      color: var(--accent2);
+      border: 1px solid rgba(255,71,87,.3);
+    }
+    .btn-danger:hover { background: rgba(255,71,87,.1); }
+
+    .btn-sm { padding: 6px 12px; font-size: 11px; }
+
+    /* Docs */
+    .docs {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.9;
+    }
+    .docs code {
+      background: var(--surface2);
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: var(--accent);
+    }
+
+    audio { display: none; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="wordmark">STUDIO<span>.P2P</span></div>
+  <div id="rtt"></div>
+
+  <!-- ── Lobby ── -->
+  <div id="lobby" class="hidden">
+    <h1>Podcast<em>Studio</em></h1>
+    <p>End-to-end encrypted · Audio stays on your machine · No accounts</p>
+    <div class="lobby-actions">
+      <button class="btn-primary" id="btnCreate">＋ Create Room</button>
+    </div>
+    <div class="lobby-join">
+      <input id="joinCode" type="text" placeholder="Paste room code…" spellcheck="false">
+      <button class="btn-ghost" id="btnJoin">Join →</button>
+    </div>
+  </div>
+
+  <!-- ── Room ── -->
+  <div id="room" class="hidden">
+    <div class="room-header">
+      <div>
+        <div class="room-id">Room <span id="roomToken"></span></div>
+        <div class="share-bar">
+          <input id="shareLink" type="text" readonly>
+          <button class="btn-ghost btn-sm" id="btnCopyLink">Copy</button>
+        </div>
+      </div>
+      <div id="status" class="status">Connecting…</div>
+    </div>
+
+    <div class="main-pane">
+      <div id="controls" class="hidden">
+        <div class="device-row">
+          <label class="device-label">Microphone
+            <select id="micSelect" class="device-select"></select>
+          </label>
+          <label class="device-label" id="spkLabel">Output
+            <select id="spkSelect" class="device-select"></select>
+          </label>
+        </div>
+        <div class="btn-row">
+          <button class="btn-ghost" id="btnBeep">🔊 Test Sound</button>
+          <button class="btn-ghost" id="btnMic">🎙 Get Mic</button>
+          <button class="btn-primary" id="btnRecord" disabled>⏺ Start Recording</button>
+          <button class="btn-ghost" id="btnStitch" disabled>✂️ Stitch WAVs</button>
+        </div>
+
+        <div id="vox" class="hidden">
+          <div class="dot"></div>
+          <span>VOX</span>
+        </div>
+
+        <div id="transferProgress"></div>
+        <a id="transcribeLink" href="/transcribe"
+           class="btn-ghost hidden"
+           style="text-decoration:none;padding:9px 16px;border-radius:4px;font-size:12px;">
+          ✦ Open Transcriber →
+        </a>
+      </div>
+
+      <div id="log"></div>
+    </div>
+
+    <div class="sidebar">
+      <div class="sidebar-section">
+        <h3>How it works</h3>
+        <div class="docs">
+          1. Share the room link with your guest<br>
+          2. Both click <code>Get Mic</code><br>
+          3. Both click <code>Start Recording</code><br>
+          4. Talk — 3 recorders run simultaneously<br>
+          5. Stop → files auto-download<br><br>
+          <code>*-hq.wav</code> lossless master<br>
+          <code>*-meta.json</code> VOX timestamps<br>
+          <code>*-whisper.webm</code> 32kbps Opus<br><br>
+          6. Send HQ + meta to peer via P2P<br>
+          7. <code>Stitch WAVs</code> → stereo master<br>
+          8. <code>Open Transcriber</code> → Whisper
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Signal</h3>
+        <div class="docs">
+          Monitor: Opus (WebRTC, low-latency)<br>
+          HQ record: WAV/PCM (local, lossless)<br>
+          Whisper: 32kbps Opus webm × 2<br>
+          &nbsp;&nbsp;own mic + peer stream<br>
+          Transfer: P2P data channel
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <audio id="remoteAudio" autoplay playsinline></audio>
+
+  <script src="/vendor/simplepeer.min.js"></script>
+  <script src="/client.js"></script>
+</body>
+</html>

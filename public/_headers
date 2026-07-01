@@ -1,0 +1,7 @@
+# Cross-origin isolation for SharedArrayBuffer (Whisper WASM threading).
+# `credentialless` (vs require-corp) still yields crossOriginIsolated on
+# Chrome/Edge — the only browsers Whisper runs on — without forcing every
+# cross-origin resource (transformers.js CDN, HuggingFace weights) to send CORP.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless

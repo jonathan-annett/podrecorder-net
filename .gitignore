@@ -1,0 +1,14 @@
+# Secrets — never commit (repo is public)
+*.env
+.dev.vars
+cert.json
+
+# Cloudflare / wrangler
+.wrangler/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store

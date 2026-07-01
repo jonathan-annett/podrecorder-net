@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Transcribe — Podcast Studio</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0c0c0e">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/fonts/fonts.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0c0c0e;
+      --surface:   #141418;
+      --surface2:  #1c1c22;
+      --border:    #2a2a33;
+      --accent:    #e8ff47;
+      --accent2:   #ff4757;
+      --text:      #e8e8f0;
+      --muted:     #6b6b80;
+      --success:   #47ffb4;
+      --warn:      #ffb347;
+      --host-col:  #e8ff47;
+      --guest-col: #47c4ff;
+      --mono:      'Space Mono', monospace;
+      --sans:      'Syne', sans-serif;
+    }
+    html, body {
+      min-height: 100%; background: var(--bg); color: var(--text);
+      font-family: var(--mono); font-size: 13px; line-height: 1.6;
+    }
+    body::before {
+      content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px,
+        rgba(0,0,0,.08) 2px, rgba(0,0,0,.08) 4px);
+    }
+    .wordmark {
+      position: fixed; top: 24px; left: 28px;
+      font-family: var(--sans); font-weight: 800; font-size: 18px;
+      letter-spacing: -.5px; color: var(--accent); z-index: 100;
+    }
+    .wordmark span { color: var(--muted); font-weight: 400; }
+    .wordmark a { text-decoration: none; }
+    .page { max-width: 860px; margin: 0 auto; padding: 88px 28px 80px; }
+    h1 { font-family: var(--sans); font-size: 40px; font-weight: 800;
+         letter-spacing: -1px; margin-bottom: 6px; }
+    h1 em { font-style: normal; color: var(--accent); }
+    .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 40px; }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 20px; margin-bottom: 16px;
+    }
+    .card h2 {
+      font-family: var(--sans); font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 2px;
+      color: var(--muted); margin-bottom: 14px;
+    }
+
+    /* Model grid */
+    .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 8px; }
+    .model-btn {
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); padding: 10px 12px; border-radius: 4px;
+      cursor: pointer; font-family: var(--mono); font-size: 11px;
+      text-align: left; transition: all .15s;
+    }
+    .model-btn:hover { border-color: var(--accent); }
+    .model-btn.selected { border-color: var(--accent); background: rgba(232,255,71,.07); color: var(--accent); }
+    .model-btn .mn { font-weight: 700; display: block; margin-bottom: 2px; }
+    .model-btn .ms { color: var(--muted); font-size: 10px; }
+    .model-btn.selected .ms { color: rgba(232,255,71,.5); }
+
+    /* File drops */
+    .file-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width:580px) { .file-grid { grid-template-columns: 1fr; } }
+
+    .drop-zone {
+      border: 1px dashed var(--border); border-radius: 4px;
+      padding: 16px; text-align: center; cursor: pointer;
+      transition: all .15s; position: relative; overflow: hidden;
+    }
+    .drop-zone:hover, .drop-zone.over { border-color: var(--accent); background: rgba(232,255,71,.04); }
+    .drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .drop-zone .dz-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+      color: var(--muted); display: block; margin-bottom: 4px;
+    }
+    .drop-zone.host-zone  .dz-label { color: var(--host-col); }
+    .drop-zone.guest-zone .dz-label { color: var(--guest-col); }
+    .drop-zone .dz-name { font-size: 12px; color: var(--muted); word-break: break-all; }
+    .drop-zone .dz-name.set { color: var(--text); }
+
+    /* Options */
+    .opts { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+    .opts label { font-size: 11px; color: var(--muted); margin-right: 4px; }
+    select, input[type=text] {
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); padding: 7px 10px;
+      font-family: var(--mono); font-size: 12px; border-radius: 4px; outline: none;
+    }
+    select:focus, input[type=text]:focus { border-color: var(--accent); }
+
+    /* Buttons */
+    button {
+      font-family: var(--mono); font-size: 12px; cursor: pointer;
+      border: none; border-radius: 4px; padding: 9px 16px; transition: all .15s;
+    }
+    .btn-primary { background: var(--accent); color: #0c0c0e; font-weight: 700; }
+    .btn-primary:hover:not(:disabled) { background: #d4eb30; }
+    .btn-primary:disabled { background: var(--border); color: var(--muted); cursor: default; }
+    .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .btn-ghost:disabled { color: var(--muted); cursor: default; }
+
+    /* Progress */
+    #progressWrap { margin: 20px 0; display: none; }
+    .prog-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .prog-bg { background: var(--surface2); border-radius: 3px; height: 4px; overflow: hidden; margin-bottom: 8px; }
+    .prog-fill { height: 4px; background: var(--accent); border-radius: 3px; width: 0%; transition: width .25s; }
+    #statusMsg { font-size: 11px; color: var(--muted); min-height: 16px; }
+
+    /* Transcript */
+    #transcriptWrap { display: none; }
+    .tx-toolbar {
+      display: flex; gap: 8px; margin-bottom: 14px;
+      align-items: center; flex-wrap: wrap;
+    }
+    .tx-toolbar h2 { font-family: var(--sans); font-size: 20px; font-weight: 800; flex: 1; }
+
+    #transcript {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 24px; line-height: 2; font-size: 13px;
+    }
+    .turn {
+      display: grid; grid-template-columns: 72px 56px 1fr;
+      gap: 0 14px; padding: 5px 0;
+      border-bottom: 1px solid rgba(255,255,255,.04); align-items: baseline;
+    }
+    .turn:last-child { border-bottom: none; }
+    .spk { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+    .spk.host  { color: var(--host-col); }
+    .spk.guest { color: var(--guest-col); }
+    .ts  { color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .tx  { color: var(--text); }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="wordmark"><a href="/">STUDIO<span>.P2P</span></a></div>
+
+<div class="page">
+  <h1>Tran<em>scribe</em></h1>
+  <p class="subtitle">
+    Runs entirely in your browser via Whisper WASM · No audio leaves your machine ·
+    Model downloaded once and cached · Requires Chrome or Edge (WASM SIMD)
+  </p>
+
+  <!-- Model -->
+  <div class="card">
+    <h2>Model</h2>
+    <div class="model-grid" id="modelGrid">
+      <button class="model-btn selected" data-model="Xenova/whisper-tiny">
+        <span class="mn">tiny</span><span class="ms">~75 MB · fastest</span>
+      </button>
+      <button class="model-btn" data-model="Xenova/whisper-tiny.en">
+        <span class="mn">tiny.en</span><span class="ms">~75 MB · English only</span>
+      </button>
+      <button class="model-btn" data-model="Xenova/whisper-base">
+        <span class="mn">base</span><span class="ms">~142 MB · balanced</span>
+      </button>
+      <button class="model-btn" data-model="Xenova/whisper-base.en">
+        <span class="mn">base.en</span><span class="ms">~142 MB · English</span>
+      </button>
+      <button class="model-btn" data-model="Xenova/whisper-small">
+        <span class="mn">small</span><span class="ms">~466 MB · accurate</span>
+      </button>
+      <button class="model-btn" data-model="Xenova/whisper-small.en">
+        <span class="mn">small.en</span><span class="ms">~466 MB · best English</span>
+      </button>
+    </div>
+    <div class="opts">
+      <div><label>Language</label>
+        <select id="lang">
+          <option value="english">English</option>
+          <option value="auto">Auto-detect</option>
+          <option value="french">French</option>
+          <option value="german">German</option>
+          <option value="spanish">Spanish</option>
+          <option value="portuguese">Portuguese</option>
+          <option value="italian">Italian</option>
+          <option value="japanese">Japanese</option>
+          <option value="chinese">Chinese</option>
+          <option value="korean">Korean</option>
+          <option value="dutch">Dutch</option>
+          <option value="russian">Russian</option>
+        </select>
+      </div>
+      <div><label>Host name</label>  <input type="text" id="hostName"  value="Host"  style="width:90px"></div>
+      <div><label>Guest name</label> <input type="text" id="guestName" value="Guest" style="width:90px"></div>
+    </div>
+  </div>
+
+  <!-- Files -->
+  <div class="card">
+    <h2>Whisper Audio Files</h2>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">
+      Drop the <code>*-whisper.webm</code> files produced after recording.
+      Each is a clean mono 32 kbps Opus stream — one speaker per file, no resampling needed.
+    </p>
+    <div class="file-grid">
+      <div class="drop-zone host-zone" id="dzHost"
+           ondragover="dz(event,'dzHost',true)" ondragleave="dz(event,'dzHost',false)"
+           ondrop="dzDrop(event,'dzHost','hostFile')">
+        <input type="file" accept="audio/*,video/webm" onchange="filePicked(this,'dzHost','hostFile')">
+        <span class="dz-label">Host whisper.webm</span>
+        <span class="dz-name" id="dzHostName">click or drop file</span>
+      </div>
+      <div class="drop-zone guest-zone" id="dzGuest"
+           ondragover="dz(event,'dzGuest',true)" ondragleave="dz(event,'dzGuest',false)"
+           ondrop="dzDrop(event,'dzGuest','guestFile')">
+        <input type="file" accept="audio/*,video/webm" onchange="filePicked(this,'dzGuest','guestFile')">
+        <span class="dz-label">Guest whisper.webm</span>
+        <span class="dz-name" id="dzGuestName">click or drop file</span>
+      </div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn-primary" id="btnGo" onclick="run()">▶ Transcribe</button>
+      <span style="font-size:11px;color:var(--muted)">
+        Model loads once and is cached in your browser
+      </span>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div id="progressWrap">
+    <div class="prog-row"><span id="progPhase">Initialising…</span><span id="progPct">0%</span></div>
+    <div class="prog-bg"><div class="prog-fill" id="progFill"></div></div>
+    <div id="statusMsg"></div>
+  </div>
+
+  <!-- Transcript -->
+  <div id="transcriptWrap">
+    <div class="tx-toolbar">
+      <h2>Transcript</h2>
+      <button class="btn-ghost" onclick="exportFmt('txt')">↓ .txt</button>
+      <button class="btn-ghost" onclick="exportFmt('srt')">↓ .srt</button>
+      <button class="btn-ghost" onclick="exportFmt('md')">↓ .md</button>
+    </div>
+    <div id="transcript"></div>
+  </div>
+</div>
+
+<script type="module">
+// ─────────────────────────────────────────────────────────────────────────────
+// transformers.js v2 via jsDelivr CDN — no build step needed.
+// Models are fetched from HuggingFace and cached in the browser (IndexedDB).
+// ─────────────────────────────────────────────────────────────────────────────
+import { pipeline, env } from
+  'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+
+// Allow model downloads from HuggingFace CDN
+env.allowRemoteModels  = true;
+env.allowLocalModels   = false;
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let selectedModel = 'Xenova/whisper-tiny';
+let hostFile      = null;
+let guestFile     = null;
+let segments      = [];   // [{ role, start, end, text }] merged and sorted
+
+// ─── Model selector ──────────────────────────────────────────────────────────
+window.selectModel = function(btn) {
+  document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+  selectedModel = btn.dataset.model;
+};
+document.querySelectorAll('.model-btn').forEach(b => {
+  b.onclick = () => window.selectModel(b);
+});
+
+// ─── Drag-and-drop helpers ───────────────────────────────────────────────────
+window.dz = function(e, id, over) {
+  e.preventDefault();
+  document.getElementById(id).classList.toggle('over', over);
+};
+window.dzDrop = function(e, id, key) {
+  e.preventDefault();
+  document.getElementById(id).classList.remove('over');
+  const file = e.dataTransfer.files[0];
+  if (file) assignFile(file, id, key);
+};
+window.filePicked = function(input, id, key) {
+  const file = input.files[0];
+  if (file) assignFile(file, id, key);
+};
+
+function assignFile(file, dzId, key) {
+  if (key === 'hostFile')  hostFile  = file;
+  if (key === 'guestFile') guestFile = file;
+  const nameEl = document.getElementById(dzId + 'Name');
+  nameEl.textContent = file.name;
+  nameEl.classList.add('set');
+}
+
+// ─── Progress UI helpers ──────────────────────────────────────────────────────
+function showProgress(phase, pct, status) {
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('progPhase').textContent = phase;
+  document.getElementById('progPct').textContent   = Math.round(pct) + '%';
+  document.getElementById('progFill').style.width  = pct + '%';
+  if (status !== undefined) document.getElementById('statusMsg').textContent = status;
+}
+
+// ─── Audio → Float32 @ 16kHz mono ────────────────────────────────────────────
+// transformers.js AutomaticSpeechRecognition pipeline accepts a Float32Array
+// at 16kHz. We decode via OfflineAudioContext and downsample if needed.
+async function fileToFloat32(file) {
+  const arrayBuf = await file.arrayBuffer();
+  const tmpCtx   = new OfflineAudioContext(1, 1, 16000);
+  let decoded;
+  try {
+    decoded = await tmpCtx.decodeAudioData(arrayBuf);
+  } catch {
+    // Some browsers can't decode webm directly in OfflineAudioContext —
+    // fall back to AudioContext (online) which has wider codec support.
+    const onlineCtx = new AudioContext({ sampleRate: 16000 });
+    decoded = await onlineCtx.decodeAudioData(arrayBuf.slice(0));
+    onlineCtx.close();
+  }
+
+  const offCtx = new OfflineAudioContext(1, Math.ceil(decoded.duration * 16000), 16000);
+  const src     = offCtx.createBufferSource();
+  src.buffer    = decoded;
+  src.connect(offCtx.destination);
+  src.start(0);
+  const rendered = await offCtx.startRendering();
+  return rendered.getChannelData(0);  // Float32Array, 16kHz mono
+}
+
+// ─── Main transcription flow ─────────────────────────────────────────────────
+window.run = async function() {
+  if (!hostFile && !guestFile) {
+    alert('Add at least one audio file.'); return;
+  }
+
+  const lang      = document.getElementById('lang').value;
+  const hostName  = document.getElementById('hostName').value  || 'Host';
+  const guestName = document.getElementById('guestName').value || 'Guest';
+
+  document.getElementById('btnGo').disabled    = true;
+  document.getElementById('transcriptWrap').style.display = 'none';
+  segments = [];
+
+  try {
+    // ── Load model ──────────────────────────────────────────────────────────
+    showProgress('Loading model…', 2, 'Downloading from HuggingFace (cached after first run)');
+    const transcriber = await pipeline('automatic-speech-recognition', selectedModel, {
+      progress_callback: (p) => {
+        if (p.status === 'downloading') {
+          const pct = p.total ? (p.loaded / p.total) * 40 : 0;
+          showProgress(`Downloading model… ${p.file ?? ''}`, pct,
+            `${((p.loaded || 0) / 1e6).toFixed(1)} / ${((p.total || 0) / 1e6).toFixed(1)} MB`);
+        }
+        if (p.status === 'loaded') showProgress('Model ready', 42, '');
+      },
+    });
+
+    // ── Process files ────────────────────────────────────────────────────────
+    const files = [
+      hostFile  ? { file: hostFile,  role: 'host',  name: hostName,  baseProgress: 42 } : null,
+      guestFile ? { file: guestFile, role: 'guest', name: guestName, baseProgress: 72 } : null,
+    ].filter(Boolean);
+
+    for (const { file, role, name, baseProgress } of files) {
+      showProgress(`Decoding ${name}…`, baseProgress, 'Decoding audio to 16kHz PCM');
+      const audio = await fileToFloat32(file);
+
+      showProgress(`Transcribing ${name}…`, baseProgress + 5,
+        `Running Whisper on ${(audio.length / 16000).toFixed(0)}s of audio…`);
+
+      const result = await transcriber(audio, {
+        language:         lang === 'auto' ? undefined : lang,
+        task:             'transcribe',
+        chunk_length_s:   30,
+        stride_length_s:  5,
+        return_timestamps: true,
+        // Stream chunks as they complete
+        callback_function: (partial) => {
+          const done = partial[0]?.chunks?.length ?? 0;
+          showProgress(`Transcribing ${name}…`, baseProgress + 5 + (done * 0.5) % 25,
+            `${done} chunk${done === 1 ? '' : 's'} done…`);
+        },
+      });
+
+      // result.chunks: [{ text, timestamp: [start, end] }]
+      const chunks = result.chunks ?? [{ text: result.text, timestamp: [0, null] }];
+      for (const chunk of chunks) {
+        segments.push({
+          role,
+          name,
+          start: chunk.timestamp?.[0] ?? 0,
+          end:   chunk.timestamp?.[1] ?? null,
+          text:  chunk.text.trim(),
+        });
+      }
+    }
+
+    // ── Merge and sort by start time ─────────────────────────────────────────
+    segments.sort((a, b) => a.start - b.start);
+
+    showProgress('Done', 100, '');
+    renderTranscript();
+
+  } catch (err) {
+    showProgress('Error', 0, err.message);
+    console.error(err);
+  } finally {
+    document.getElementById('btnGo').disabled = false;
+  }
+};
+
+// ─── Render transcript ────────────────────────────────────────────────────────
+function fmtTime(sec) {
+  if (sec == null) return '??:??';
+  const m = Math.floor(sec / 60).toString().padStart(2, '0');
+  const s = Math.floor(sec % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function renderTranscript() {
+  const el = document.getElementById('transcript');
+  el.innerHTML = '';
+
+  for (const seg of segments) {
+    const row  = document.createElement('div');
+    row.className = 'turn';
+
+    const spk  = document.createElement('div');
+    spk.className = `spk ${seg.role}`;
+    spk.textContent = seg.name;
+
+    const ts   = document.createElement('div');
+    ts.className = 'ts';
+    ts.textContent = fmtTime(seg.start);
+
+    const tx   = document.createElement('div');
+    tx.className = 'tx';
+    tx.textContent = seg.text;
+
+    row.append(spk, ts, tx);
+    el.appendChild(row);
+  }
+
+  document.getElementById('transcriptWrap').style.display = 'block';
+  document.getElementById('transcriptWrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ─── Export formats ───────────────────────────────────────────────────────────
+function srtTime(sec) {
+  if (sec == null) sec = 0;
+  const h   = Math.floor(sec / 3600);
+  const m   = Math.floor((sec % 3600) / 60);
+  const s   = Math.floor(sec % 60);
+  const ms  = Math.round((sec % 1) * 1000);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(ms).padStart(3,'0')}`;
+}
+
+window.exportFmt = function(fmt) {
+  let content = '';
+  const hostName  = document.getElementById('hostName').value  || 'Host';
+  const guestName = document.getElementById('guestName').value || 'Guest';
+
+  if (fmt === 'txt') {
+    content = segments.map(s =>
+      `[${fmtTime(s.start)}] ${s.name}: ${s.text}`
+    ).join('\n');
+
+  } else if (fmt === 'srt') {
+    content = segments.map((s, i) => {
+      const endSec = s.end ?? (s.start + 5);
+      return `${i + 1}\n${srtTime(s.start)} --> ${srtTime(endSec)}\n${s.name}: ${s.text}`;
+    }).join('\n\n');
+
+  } else if (fmt === 'md') {
+    content = `# Podcast Transcript\n\n`;
+    content += `*Generated ${new Date().toLocaleString()}*\n\n---\n\n`;
+    content += segments.map(s =>
+      `**${s.name}** \`${fmtTime(s.start)}\`\n\n${s.text}\n`
+    ).join('\n');
+  }
+
+  const blob = new Blob([content], { type: 'text/plain' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = `transcript.${fmt}`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+};
+
+// Expose hostFile/guestFile to outer scope for the non-module drop handlers
+window._setFile = function(key, file) {
+  if (key === 'hostFile')  hostFile  = file;
+  if (key === 'guestFile') guestFile = file;
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+name = "podcast-studio"
+main = "src/worker.js"
+compatibility_date = "2025-06-01"
+
+# Static PWA assets (index.html, client.js, transcribe.html, sw.js, icons, _headers)
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# One Durable Object instance per room token holds the two peer WebSockets
+# and relays signaling between them (replaces the in-memory Map in server.js).
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# Recording store-and-forward fallback when the P2P data channel can't complete.
+# Set a 24h lifecycle rule on the bucket (dashboard or `wrangler r2 bucket lifecycle`).
+[[r2_buckets]]
+binding = "RECORDINGS"
+bucket_name = "podcast-studio-recordings"
+
+# Cloudflare Realtime TURN credentials are minted in /api/turn-credentials.
+# Provide these as secrets (never commit):
+#   wrangler secret put TURN_TOKEN_ID
+#   wrangler secret put TURN_API_TOKEN
+# If unset, the endpoint gracefully returns STUN-only ICE servers.
