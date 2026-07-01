@@ -410,6 +410,14 @@ await test('turn-credentials: entitled room reports entitled:true', async () => 
   eq(body.entitled, true, 'entitled room should be entitled:true');
 });
 
+await test('config exposes billingEnabled (true with BILLING_ENABLED in .dev.vars)', async () => {
+  const res = await fetch(`${BASE}/api/config`);
+  eq(res.status, 200);
+  const body = await res.json();
+  eq(typeof body.billingEnabled, 'boolean', 'billingEnabled should be a boolean');
+  eq(body.billingEnabled, true, 'expected true from BILLING_ENABLED=true in .dev.vars');
+});
+
 // ── Summary ──
 console.log(`\n${passed} passed, ${failures.length} failed\n`);
 if (failures.length) {

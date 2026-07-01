@@ -47,3 +47,9 @@ bucket_name = "podcast-studio-recordings"
 # CI/dev only — a shared secret that flips a room to entitled without a real
 # login (see requirePro / test/run.mjs). NEVER set this in production.
 #   wrangler secret put TEST_ENTITLE_SECRET      # or set in .dev.vars for `wrangler dev`
+#
+# BILLING_ENABLED — gates whether the client renders the auth/billing (sign-in /
+# Go Pro) UI at all. Defaults OFF: a public deploy stays free-only with no payment
+# surface, so visitors never hit a checkout that can't succeed. Set to "true" only
+# once PRODUCTION billing is live (prod Clerk pk_live_/sk_live_ + real Stripe):
+#   wrangler secret put BILLING_ENABLED          # value: true   (and in .dev.vars for local)

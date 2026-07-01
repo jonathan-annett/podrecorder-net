@@ -93,6 +93,15 @@ export default {
       return stub.fetch(request);
     }
 
+    // Client-visible config: is the auth/billing UI enabled? Defaults OFF so a
+    // public deploy stays free-only (no payment surface) until production billing
+    // is live — visitors never hit a checkout that can't succeed (dev/test Stripe
+    // rejects real cards). Enforcement of Pro is separate (requirePro); this only
+    // controls whether the sign-in / Go Pro UI renders.
+    if (pathname === '/api/config') {
+      return json({ billingEnabled: env.BILLING_ENABLED === 'true' });
+    }
+
     // ── Room lifecycle API ──
     if (pathname === '/api/create-room') {
       const token = genToken();

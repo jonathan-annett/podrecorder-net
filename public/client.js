@@ -782,6 +782,16 @@ function waitForClerk(timeoutMs = 5000) {
 }
 
 async function initClerk() {
+  // Only surface the auth/billing UI when the Worker says billing is enabled
+  // (BILLING_ENABLED=true). Defaults off, so a public deploy stays free-only and
+  // never shows a checkout that can't succeed until production billing is live.
+  let billingEnabled = false;
+  try {
+    const cfg = await fetch('/api/config').then((r) => r.json());
+    billingEnabled = !!cfg.billingEnabled;
+  } catch { /* default off — free tier only */ }
+  if (!billingEnabled) return;
+
   const clerk = await waitForClerk();
   if (!clerk) return; // not configured — free tier only
   try {
