@@ -995,7 +995,19 @@ async function initClerk() {
   };
   window.addEventListener('focus', refreshEntitlement);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshEntitlement(); });
-  setInterval(refreshEntitlement, 8000);
+
+  // Instant refresh when a Clerk modal (account / checkout) is dismissed: watch for
+  // its DOM nodes (classes prefixed `cl-`) being removed, rather than waiting for
+  // the focus/interval fallback.
+  const clerkModalPresent = () => !!document.querySelector('[class*="cl-modal"]');
+  let clerkModalWasOpen = false;
+  new MutationObserver(() => {
+    const open = clerkModalPresent();
+    if (clerkModalWasOpen && !open) refreshEntitlement();   // modal just closed
+    clerkModalWasOpen = open;
+  }).observe(document.body, { childList: true, subtree: true });
+
+  setInterval(refreshEntitlement, 30000);   // safety-net fallback
 }
 
 function hasPro(clerk) {
