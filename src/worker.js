@@ -222,12 +222,17 @@ export class Room {
 
     server.send(JSON.stringify({ type: 'role', role, serverTime: Date.now() }));
 
-    // When the guest arrives and the host is present, tell both (clock sync anchor).
-    if (role === 'guest') {
-      const host = this.ctx.getWebSockets('host')[0];
+    // If both participants are now present, announce to both. This fires whether
+    // the guest OR the host was the second to (re)connect — so a host that
+    // refreshes and rejoins an occupied room re-triggers peer setup, exactly like
+    // a guest does. (Previously peer-joined only fired for guests, so a host
+    // refresh never recovered the connection.)
+    const host  = this.ctx.getWebSockets('host')[0];
+    const guest = this.ctx.getWebSockets('guest')[0];
+    if (host && guest) {
       const ts = JSON.stringify({ type: 'peer-joined', serverTime: Date.now() });
-      if (host) host.send(ts);
-      server.send(ts);
+      host.send(ts);
+      guest.send(ts);
     }
 
     return new Response(null, { status: 101, webSocket: client });

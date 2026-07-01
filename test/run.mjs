@@ -82,10 +82,19 @@ function openWS(token) {
       });
     });
   ws.send$ = (obj) => ws.send(JSON.stringify(obj));
+  ws.count = (type) => seen.filter((m) => m.type === type).length;
   return ws;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitUntil(fn, timeout = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (fn()) return;
+    await sleep(50);
+  }
+  throw new Error('waitUntil timed out');
+}
 
 console.log(`\nLayer 0 headless tests → ${BASE}\n`);
 
@@ -263,6 +272,35 @@ await test('when a peer disconnects the survivor receives peer-left', async () =
 });
 
 // ── R2 recording fallback ──
+await test('host can rejoin an occupied room and both sides get peer-joined again', async () => {
+  const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const a = openWS(t);
+  await a.opened;
+  await a.waitFor('role'); // host
+  const b = openWS(t);
+  await b.opened;
+  await b.waitFor('role'); // guest
+  await b.waitFor('peer-joined');
+  const bBefore = b.count('peer-joined');
+
+  // Host drops (simulates a refresh) …
+  a.close();
+  await b.waitFor('peer-left');
+  await sleep(200);
+
+  // … and reconnects: should be reassigned host, and BOTH sides get a fresh peer-joined.
+  const a2 = openWS(t);
+  await a2.opened;
+  const role = await a2.waitFor('role');
+  eq(role.role, 'host', 'rejoining host should be assigned host again');
+  await a2.waitFor('peer-joined');                        // the rejoined host is told
+  await waitUntil(() => b.count('peer-joined') > bBefore); // the existing guest is told again
+
+  a2.close();
+  b.close();
+  await sleep(150);
+});
+
 await test('blob PUT then GET round-trips bytes through R2', async () => {
   const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
   const bytes = new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4, 255, 0, 128]); // "RIFF"+
