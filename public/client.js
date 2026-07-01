@@ -400,7 +400,15 @@ function exportWhisperFiles() {
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWS(token) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
+  // Per-tab nonce (survives refresh via sessionStorage) so the server reuses this
+  // client's slot on reconnect instead of rejecting it as a third peer ("Room is full").
+  let nonce = sessionStorage.getItem('ps-nonce');
+  if (!nonce) {
+    nonce = (crypto.randomUUID && crypto.randomUUID()) ||
+            (Date.now().toString(36) + Math.random().toString(16).slice(2));
+    sessionStorage.setItem('ps-nonce', nonce);
+  }
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}&nonce=${encodeURIComponent(nonce)}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -426,6 +434,9 @@ function connectWS(token) {
         setStatus('Connecting…', 'connecting');
         document.getElementById('controls').classList.remove('hidden');
         peerJoined = true;
+        // If we already have a peer, the other side just (re)connected (e.g. a page
+        // refresh) — tear down the stale connection so we renegotiate cleanly.
+        if (peer) { try { peer.destroy(); } catch { /* already gone */ } peer = null; pendingSignals = []; }
         if (!localStream) log('Click “Get Mic” to start the call', 'info');
         maybeInitPeer();
         break;

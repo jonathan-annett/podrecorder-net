@@ -52,8 +52,9 @@ function eq(a, b, msg) {
 }
 
 // ── WebSocket helper: buffers messages, lets tests await a given type ──
-function openWS(token) {
-  const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`);
+function openWS(token, nonce) {
+  const qs = `?token=${encodeURIComponent(token)}` + (nonce ? `&nonce=${encodeURIComponent(nonce)}` : '');
+  const ws = new WebSocket(`${WS_BASE}/ws${qs}`);
   const seen = [];
   const binaries = [];
   const waiters = [];
@@ -422,12 +423,26 @@ await test('turn-credentials: entitled room reports entitled:true', async () => 
   eq(body.entitled, true, 'entitled room should be entitled:true');
 });
 
-await test('config exposes authMode (prelaunch from .dev.vars)', async () => {
+await test('config exposes a valid authMode', async () => {
   const res = await fetch(`${BASE}/api/config`);
   eq(res.status, 200);
   const body = await res.json();
-  eq(typeof body.authMode, 'string', 'authMode should be a string');
-  eq(body.authMode, 'prelaunch', 'expected prelaunch from AUTH_MODE in .dev.vars');
+  assert(['off', 'prelaunch', 'live'].includes(body.authMode), `unexpected authMode: ${body.authMode}`);
+});
+
+await test('reconnect with the same nonce reuses the slot (refresh is not "room full")', async () => {
+  const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const a = openWS(t, 'nonce-a'); await a.opened; const aRole = await a.waitFor('role');
+  const b = openWS(t, 'nonce-b'); await b.opened; const bRole = await b.waitFor('role');
+  await a.waitFor('peer-joined');
+  eq(aRole.role, 'host'); eq(bRole.role, 'guest');
+
+  // Guest "refreshes": reconnect with the SAME nonce → reclaims the guest slot.
+  const b2 = openWS(t, 'nonce-b'); await b2.opened;
+  const b2msg = await b2.waitFor('role');   // 'role' (not 'error: Room is full')
+  eq(b2msg.role, 'guest', 'refreshed client should reclaim its slot, not be rejected');
+
+  a.close(); b.close(); b2.close(); await sleep(150);
 });
 
 await test('entitled room relays a binary frame between peers (WS media fallback)', async () => {

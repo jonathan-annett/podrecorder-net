@@ -300,14 +300,15 @@ export class Room {
     }
 
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleUpgrade();
+      return this.handleUpgrade(request);
     }
 
     return new Response('not found', { status: 404 });
   }
 
-  async handleUpgrade() {
+  async handleUpgrade(request) {
     const created = await this.ctx.storage.get('created');
+    const nonce = new URL(request.url).searchParams.get('nonce') || null;
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
@@ -321,30 +322,41 @@ export class Room {
 
     if (created == null) return reject('Invalid room token');
 
-    const hasHost = this.ctx.getWebSockets('host').length > 0;
-    const hasGuest = this.ctx.getWebSockets('guest').length > 0;
-
-    let role;
-    if (!hasHost) role = 'host';
-    else if (!hasGuest) role = 'guest';
-    else return reject('Room is full');
+    // Reconnect handling: a live socket carrying the same client nonce (e.g. a page
+    // refresh in the same tab) is the SAME client — evict the stale socket and reuse
+    // its slot, instead of counting it as a third participant ("Room is full").
+    let role = null;
+    const liveRoles = [];
+    for (const s of this.ctx.getWebSockets()) {
+      const a = s.deserializeAttachment() || {};
+      if (nonce && a.nonce === nonce) {
+        role = a.role || null;
+        try { s.close(1000, 'reconnected'); } catch { /* already closing */ }
+      } else if (a.role) {
+        liveRoles.push(a.role);
+      }
+    }
+    if (!role) {
+      if (!liveRoles.includes('host')) role = 'host';
+      else if (!liveRoles.includes('guest')) role = 'guest';
+      else return reject('Room is full');
+    }
 
     this.ctx.acceptWebSocket(server, [role]);
-    server.serializeAttachment({ role });
+    server.serializeAttachment({ role, nonce });
 
     server.send(JSON.stringify({ type: 'role', role, serverTime: Date.now() }));
 
-    // If both participants are now present, announce to both. This fires whether
-    // the guest OR the host was the second to (re)connect — so a host that
-    // refreshes and rejoins an occupied room re-triggers peer setup, exactly like
-    // a guest does. (Previously peer-joined only fired for guests, so a host
-    // refresh never recovered the connection.)
-    const host  = this.ctx.getWebSockets('host')[0];
-    const guest = this.ctx.getWebSockets('guest')[0];
-    if (host && guest) {
+    // Announce peer-joined to both when the room now has both roles present. Target
+    // the NEW socket + the other role's live socket, so a just-evicted stale socket
+    // is never used. Fires for host OR guest (re)joining — a refresh re-triggers
+    // peer setup on the surviving side too.
+    const otherRole = role === 'host' ? 'guest' : 'host';
+    const other = this.ctx.getWebSockets(otherRole).find((s) => s.readyState === 1);
+    if (other) {
       const ts = JSON.stringify({ type: 'peer-joined', serverTime: Date.now() });
-      host.send(ts);
-      guest.send(ts);
+      server.send(ts);
+      other.send(ts);
     }
 
     return new Response(null, { status: 101, webSocket: client });
@@ -395,7 +407,10 @@ export class Room {
     }
   }
 
-  webSocketClose(ws) {
+  webSocketClose(ws, code, reason) {
+    // A socket we intentionally evicted on reconnect (same nonce) — don't tell the
+    // peer someone left; the client is just refreshing and reclaiming its slot.
+    if (reason === 'reconnected') return;
     const att = ws.deserializeAttachment() || {};
     const peer = this.ctx.getWebSockets(att.role === 'host' ? 'guest' : 'host')[0];
     if (peer && peer.readyState === 1)
