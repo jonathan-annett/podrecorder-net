@@ -41,26 +41,31 @@ function withIsolation(res) {
   return new Response(res.body, { status: res.status, headers: h });
 }
 
-// ── Entitlement (Clerk Billing) ──────────────────────────────────────────────
-// TURN + R2 are Pro-only. This resolves whether the *caller* is entitled to
-// create an entitled room. Returns a userId string when entitled, else null.
-//   • CI bypass: `X-Test-Entitle: <TEST_ENTITLE_SECRET>` — only honored when the
-//     secret is set (never in prod, where it is unset).
-//   • Otherwise verify the Clerk session JWT and check the `pro` plan via has().
+// ── Entitlement ──────────────────────────────────────────────────────────────
+// TURN + R2 (+ WS relay) are gated. Resolves whether the caller is entitled to
+// create an entitled room; returns a userId string when entitled, else null.
+// Governed by AUTH_MODE:
+//   • 'off'       — no auth; nobody is entitled via sign-in (default; prod today).
+//   • 'prelaunch' — any signed-in user is entitled (no payment). Pre-launch testing.
+//   • 'live'      — entitled only with the paid `pro` plan (has({plan:'pro'})).
+// CI bypass: `X-Test-Entitle: <TEST_ENTITLE_SECRET>` — only honored when the secret
+// is set (never in prod). It works regardless of AUTH_MODE.
 async function requirePro(request, env) {
   const testHeader = request.headers.get('X-Test-Entitle');
   if (env.TEST_ENTITLE_SECRET && testHeader === env.TEST_ENTITLE_SECRET) {
     return 'test-user';
   }
-  if (!env.CLERK_SECRET_KEY) return null;
+  const mode = env.AUTH_MODE || 'off';
+  if (mode === 'off' || !env.CLERK_SECRET_KEY) return null;
   try {
     const clerk = createClerkClient({
       secretKey: env.CLERK_SECRET_KEY,
       publishableKey: env.CLERK_PUBLISHABLE_KEY,
     });
-    const state = await clerk.authenticateRequest(request);
-    const auth = state.toAuth();
-    if (auth?.userId && auth.has({ plan: 'pro' })) return auth.userId;
+    const auth = (await clerk.authenticateRequest(request)).toAuth();
+    if (!auth?.userId) return null;
+    if (mode === 'prelaunch') return auth.userId;               // signed-in = entitled
+    if (mode === 'live' && auth.has({ plan: 'pro' })) return auth.userId;
     return null;
   } catch {
     return null;
@@ -93,13 +98,12 @@ export default {
       return stub.fetch(request);
     }
 
-    // Client-visible config: is the auth/billing UI enabled? Defaults OFF so a
-    // public deploy stays free-only (no payment surface) until production billing
-    // is live — visitors never hit a checkout that can't succeed (dev/test Stripe
-    // rejects real cards). Enforcement of Pro is separate (requirePro); this only
-    // controls whether the sign-in / Go Pro UI renders.
+    // Client-visible config: which auth mode is active (off | prelaunch | live).
+    // Defaults 'off' so a public deploy stays free-only (no auth UI, no payment
+    // surface). 'prelaunch' shows sign-in only (no checkout; sign-in = entitled);
+    // 'live' shows sign-in + Go Pro (entitlement requires the paid plan).
     if (pathname === '/api/config') {
-      return json({ billingEnabled: env.BILLING_ENABLED === 'true' });
+      return json({ authMode: env.AUTH_MODE || 'off' });
     }
 
     // ── Room lifecycle API ──

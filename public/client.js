@@ -17,6 +17,7 @@ let pendingSignals = [];   // signals that arrived before the peer was construct
 let connStatsTimer = null; // polls getStats() to keep the connection-type badge live
 
 // WS relay fallback (Pro) — live audio via the Durable Object when WebRTC can't connect
+let authMode       = 'off';   // 'off' | 'prelaunch' | 'live' (from /api/config)
 let roomEntitled   = false;   // Pro entitlement for this room (from /api/turn-credentials)
 let relayMode      = false;   // live audio currently flowing over the WS relay
 let relayRecorder  = null;    // MediaRecorder capturing local mic for relay
@@ -951,15 +952,15 @@ function waitForClerk(timeoutMs = 5000) {
 }
 
 async function initClerk() {
-  // Only surface the auth/billing UI when the Worker says billing is enabled
-  // (BILLING_ENABLED=true). Defaults off, so a public deploy stays free-only and
-  // never shows a checkout that can't succeed until production billing is live.
-  let billingEnabled = false;
+  // Auth UI only appears in 'prelaunch' or 'live' mode (AUTH_MODE on the Worker).
+  // 'off' (default) → no auth UI at all; a public deploy stays free-only with no
+  // payment surface. 'prelaunch' → sign-in only (no checkout; sign-in = entitled).
+  // 'live' → sign-in + Go Pro (entitlement requires the paid plan).
   try {
     const cfg = await fetch('/api/config').then((r) => r.json());
-    billingEnabled = !!cfg.billingEnabled;
-  } catch { /* default off — free tier only */ }
-  if (!billingEnabled) return;
+    authMode = cfg.authMode || 'off';
+  } catch { authMode = 'off'; }
+  if (authMode === 'off') return;
 
   const clerk = await waitForClerk();
   if (!clerk) return; // not configured — free tier only
@@ -994,7 +995,8 @@ function renderClerk(clerk) {
   const goPro    = document.getElementById('btnGoPro');
   const userBtn  = document.getElementById('userButton');
   const signedIn = !!clerk.user;
-  const pro      = signedIn && hasPro(clerk);
+  // In 'prelaunch', being signed in grants access (preview). In 'live' it needs the plan.
+  const entitled = signedIn && (authMode === 'prelaunch' || hasPro(clerk));
 
   if (signIn) signIn.classList.toggle('hidden', signedIn);
   if (userBtn) {
@@ -1006,10 +1008,12 @@ function renderClerk(clerk) {
   }
   if (badge) {
     badge.classList.toggle('hidden', !signedIn);
-    badge.classList.toggle('pro', pro);
-    badge.textContent = pro ? 'Pro' : 'Free';
+    badge.classList.toggle('pro', entitled);
+    badge.textContent = !signedIn ? '' : (authMode === 'prelaunch' ? 'Preview' : (entitled ? 'Pro' : 'Free'));
   }
-  if (goPro) goPro.classList.toggle('hidden', pro); // already Pro → nothing to buy
+  // "Go Pro" (checkout) is shown ONLY in 'live' mode for a signed-in, not-yet-Pro
+  // user. In 'prelaunch' it's always hidden — no payment path exists.
+  if (goPro) goPro.classList.toggle('hidden', !(authMode === 'live' && signedIn && !entitled));
 }
 
 function openGoPro(clerk) {
