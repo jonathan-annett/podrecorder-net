@@ -977,8 +977,6 @@ async function initClerk() {
     () => clerk.openSignIn({ afterSignInUrl: location.href }));
   document.getElementById('btnGoPro')?.addEventListener('click',
     () => openGoPro(clerk));
-  document.getElementById('btnProClose')?.addEventListener('click',
-    () => closeGoPro(clerk));
 
   renderClerk(clerk);
   clerk.addListener(() => renderClerk(clerk));
@@ -1047,32 +1045,11 @@ function openGoPro(clerk) {
     clerk.openSignIn({ afterSignInUrl: location.href });
     return;
   }
-  // Show Clerk's PricingTable in an OPAQUE full-page view (#proModal) — not a
-  // translucent overlay. That way Clerk's checkout drawer (card entry) opens over a
-  // plain page, exactly like sign-in did, and can't be masked by a backdrop of ours.
-  const modal = document.getElementById('proModal');
-  const host  = document.getElementById('pricingHost');
-  if (!modal || !host || typeof clerk.mountPricingTable !== 'function') {
-    clerk.openUserProfile(); // fallback if this Clerk build lacks PricingTable
-    return;
-  }
-  host.replaceChildren();
-  modal.classList.remove('hidden');
-  try {
-    clerk.mountPricingTable(host);
-  } catch (e) {
-    console.warn('PricingTable mount failed', e);
-    modal.classList.add('hidden');
-    clerk.openUserProfile();
-  }
-}
-
-function closeGoPro(clerk) {
-  const modal = document.getElementById('proModal');
-  const host  = document.getElementById('pricingHost');
-  try { clerk.unmountPricingTable?.(host); } catch { /* ignore */ }
-  if (host) host.replaceChildren();
-  modal?.classList.add('hidden');
+  // Open Clerk's OWN account/billing modal (Manage account → Billing → change
+  // plan). Mounting <PricingTable/> inside a custom overlay repeatedly left Clerk's
+  // checkout masked / non-interactive; Clerk's native modal layers correctly (it's
+  // the flow that works for managing the subscription).
+  clerk.openUserProfile();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
