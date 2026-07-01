@@ -1,0 +1,5 @@
+# Files in public/ that should NOT be uploaded as Worker static assets.
+.DS_Store
+**/.DS_Store
+# Scratch source used to clip the app icons — not needed at runtime.
+images/icon.png
