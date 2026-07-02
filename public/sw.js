@@ -1,15 +1,17 @@
 // Service worker — offline app shell + runtime caching.
 //
 // Strategy:
-//   • Core shell (studio page + client + vendored simple-peer + fonts) is
-//     precached so the app loads offline.
-//   • Same-origin GETs are cache-first (static assets rarely change per deploy).
-//   • Navigations are network-first, falling back to the cached shell offline.
-//   • /api/* and the /ws signaling upgrade always go to the network (never cached).
-//   • Cross-origin requests (transformers.js CDN, HuggingFace weights) pass through.
+//   • App CODE (navigations, client.js, /transcribe) is NETWORK-FIRST — a new
+//     deploy is picked up on the next plain reload, with NO cache-clearing (so
+//     sessionStorage, e.g. the reconnect nonce, is preserved). Falls back to cache
+//     when offline.
+//   • Immutable assets (fonts, vendored simple-peer, icons, manifest) are
+//     cache-first (stale-while-revalidate).
+//   • /api/* and the /ws signaling upgrade always hit the network (never cached).
+//   • Cross-origin (transformers.js CDN, HuggingFace) pass through untouched.
 //
-// Bump CACHE on each deploy that changes a precached asset.
-const CACHE = 'podcast-studio-v1';
+// Bump CACHE whenever the precached shell changes (also forces clients to update).
+const CACHE = 'podcast-studio-v2';
 const CORE = [
   '/',
   '/index.html',
@@ -36,29 +38,39 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Network-first: fresh from the network (cache the copy), fall back to cache offline.
+function networkFirst(request) {
+  return fetch(request)
+    .then((res) => {
+      if (res.ok && res.type === 'basic') {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(request, copy));
+      }
+      return res;
+    })
+    .catch(() => caches.match(request).then((hit) => hit || caches.match('/index.html')));
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;                        // cross-origin: pass through
+  if (url.pathname === '/ws' || url.pathname.startsWith('/api/')) return; // never cache
 
-  // Only handle our own origin; let the browser fetch cross-origin (CDN/HF) directly.
-  if (url.origin !== self.location.origin) return;
-
-  // Never cache signaling or API traffic.
-  if (url.pathname === '/ws' || url.pathname.startsWith('/api/')) return;
-
-  // Navigations: network-first so a new deploy is picked up, offline → cached shell.
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request).catch(() => caches.match('/index.html')),
-    );
+  // App code must be fresh on reload → network-first (offline → cache fallback).
+  if (
+    request.mode === 'navigate' ||
+    url.pathname === '/client.js' ||
+    url.pathname === '/transcribe' ||
+    url.pathname === '/transcribe.html'
+  ) {
+    event.respondWith(networkFirst(request));
     return;
   }
 
-  // Static assets: stale-while-revalidate — serve cache instantly for offline/speed,
-  // but always refetch in the background so an updated deploy propagates next load
-  // (avoids a stale client.js getting stuck).
+  // Immutable assets: cache-first / stale-while-revalidate.
   event.respondWith(
     caches.match(request).then((hit) => {
       const network = fetch(request)

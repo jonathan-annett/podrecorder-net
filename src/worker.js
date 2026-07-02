@@ -41,26 +41,31 @@ function withIsolation(res) {
   return new Response(res.body, { status: res.status, headers: h });
 }
 
-// ── Entitlement (Clerk Billing) ──────────────────────────────────────────────
-// TURN + R2 are Pro-only. This resolves whether the *caller* is entitled to
-// create an entitled room. Returns a userId string when entitled, else null.
-//   • CI bypass: `X-Test-Entitle: <TEST_ENTITLE_SECRET>` — only honored when the
-//     secret is set (never in prod, where it is unset).
-//   • Otherwise verify the Clerk session JWT and check the `pro` plan via has().
+// ── Entitlement ──────────────────────────────────────────────────────────────
+// TURN + R2 (+ WS relay) are gated. Resolves whether the caller is entitled to
+// create an entitled room; returns a userId string when entitled, else null.
+// Governed by AUTH_MODE:
+//   • 'off'       — no auth; nobody is entitled via sign-in (default; prod today).
+//   • 'prelaunch' — any signed-in user is entitled (no payment). Pre-launch testing.
+//   • 'live'      — entitled only with the paid `pro` plan (has({plan:'pro'})).
+// CI bypass: `X-Test-Entitle: <TEST_ENTITLE_SECRET>` — only honored when the secret
+// is set (never in prod). It works regardless of AUTH_MODE.
 async function requirePro(request, env) {
   const testHeader = request.headers.get('X-Test-Entitle');
   if (env.TEST_ENTITLE_SECRET && testHeader === env.TEST_ENTITLE_SECRET) {
     return 'test-user';
   }
-  if (!env.CLERK_SECRET_KEY) return null;
+  const mode = env.AUTH_MODE || 'off';
+  if (mode === 'off' || !env.CLERK_SECRET_KEY) return null;
   try {
     const clerk = createClerkClient({
       secretKey: env.CLERK_SECRET_KEY,
       publishableKey: env.CLERK_PUBLISHABLE_KEY,
     });
-    const state = await clerk.authenticateRequest(request);
-    const auth = state.toAuth();
-    if (auth?.userId && auth.has({ plan: 'pro' })) return auth.userId;
+    const auth = (await clerk.authenticateRequest(request)).toAuth();
+    if (!auth?.userId) return null;
+    if (mode === 'prelaunch') return auth.userId;               // signed-in = entitled
+    if (mode === 'live' && auth.has({ plan: 'pro' })) return auth.userId;
     return null;
   } catch {
     return null;
@@ -93,13 +98,12 @@ export default {
       return stub.fetch(request);
     }
 
-    // Client-visible config: is the auth/billing UI enabled? Defaults OFF so a
-    // public deploy stays free-only (no payment surface) until production billing
-    // is live — visitors never hit a checkout that can't succeed (dev/test Stripe
-    // rejects real cards). Enforcement of Pro is separate (requirePro); this only
-    // controls whether the sign-in / Go Pro UI renders.
+    // Client-visible config: which auth mode is active (off | prelaunch | live).
+    // Defaults 'off' so a public deploy stays free-only (no auth UI, no payment
+    // surface). 'prelaunch' shows sign-in only (no checkout; sign-in = entitled);
+    // 'live' shows sign-in + Go Pro (entitlement requires the paid plan).
     if (pathname === '/api/config') {
-      return json({ billingEnabled: env.BILLING_ENABLED === 'true' });
+      return json({ authMode: env.AUTH_MODE || 'off' });
     }
 
     // ── Room lifecycle API ──
@@ -274,6 +278,7 @@ export class Room {
       const body = await this.readJson(request);
       if (body.entitled) {
         await this.ctx.storage.put('entitled', true);
+        this.entitled = true;
         if (body.ownerId) await this.ctx.storage.put('ownerId', body.ownerId);
       }
       return new Response('ok');
@@ -282,6 +287,7 @@ export class Room {
     if (url.pathname === '/entitle') {
       const body = await this.readJson(request);
       await this.ctx.storage.put('entitled', true);
+      this.entitled = true;
       if (body.ownerId) await this.ctx.storage.put('ownerId', body.ownerId);
       return new Response('ok');
     }
@@ -294,14 +300,15 @@ export class Room {
     }
 
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleUpgrade();
+      return this.handleUpgrade(request);
     }
 
     return new Response('not found', { status: 404 });
   }
 
-  async handleUpgrade() {
+  async handleUpgrade(request) {
     const created = await this.ctx.storage.get('created');
+    const nonce = new URL(request.url).searchParams.get('nonce') || null;
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
@@ -315,45 +322,69 @@ export class Room {
 
     if (created == null) return reject('Invalid room token');
 
-    const hasHost = this.ctx.getWebSockets('host').length > 0;
-    const hasGuest = this.ctx.getWebSockets('guest').length > 0;
-
-    let role;
-    if (!hasHost) role = 'host';
-    else if (!hasGuest) role = 'guest';
-    else return reject('Room is full');
+    // Reconnect handling: a live socket carrying the same client nonce (e.g. a page
+    // refresh in the same tab) is the SAME client — evict the stale socket and reuse
+    // its slot, instead of counting it as a third participant ("Room is full").
+    let role = null;
+    const liveRoles = [];
+    for (const s of this.ctx.getWebSockets()) {
+      const a = s.deserializeAttachment() || {};
+      if (nonce && a.nonce === nonce) {
+        role = a.role || null;
+        try { s.close(1000, 'reconnected'); } catch { /* already closing */ }
+      } else if (a.role) {
+        liveRoles.push(a.role);
+      }
+    }
+    if (!role) {
+      if (!liveRoles.includes('host')) role = 'host';
+      else if (!liveRoles.includes('guest')) role = 'guest';
+      else return reject('Room is full');
+    }
 
     this.ctx.acceptWebSocket(server, [role]);
-    server.serializeAttachment({ role });
+    server.serializeAttachment({ role, nonce });
 
     server.send(JSON.stringify({ type: 'role', role, serverTime: Date.now() }));
 
-    // If both participants are now present, announce to both. This fires whether
-    // the guest OR the host was the second to (re)connect — so a host that
-    // refreshes and rejoins an occupied room re-triggers peer setup, exactly like
-    // a guest does. (Previously peer-joined only fired for guests, so a host
-    // refresh never recovered the connection.)
-    const host  = this.ctx.getWebSockets('host')[0];
-    const guest = this.ctx.getWebSockets('guest')[0];
-    if (host && guest) {
+    // Announce peer-joined to both when the room now has both roles present. Target
+    // the NEW socket + the other role's live socket, so a just-evicted stale socket
+    // is never used. Fires for host OR guest (re)joining — a refresh re-triggers
+    // peer setup on the surviving side too.
+    const otherRole = role === 'host' ? 'guest' : 'host';
+    const other = this.ctx.getWebSockets(otherRole).find((s) => s.readyState === 1);
+    if (other) {
       const ts = JSON.stringify({ type: 'peer-joined', serverTime: Date.now() });
-      host.send(ts);
-      guest.send(ts);
+      server.send(ts);
+      other.send(ts);
     }
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(ws, message) {
-    if (typeof message !== 'string') return; // control JSON only; media is P2P
+  async webSocketMessage(ws, message) {
+    const att = ws.deserializeAttachment() || {};
+    const role = att.role;
+
+    // Binary frame → live media relay fallback (WebRTC blocked). Forward the raw
+    // frame to the peer, but ONLY for entitled (Pro) rooms — free rooms get no
+    // server relay. Cache the entitled flag so we don't hit storage per frame.
+    if (typeof message !== 'string') {
+      if (this.entitled === undefined) {
+        this.entitled = (await this.ctx.storage.get('entitled')) === true;
+      }
+      if (!this.entitled) return;
+      const peer = this.ctx.getWebSockets(role === 'host' ? 'guest' : 'host')[0];
+      if (peer && peer.readyState === 1) peer.send(message);
+      return;
+    }
+
     let msg;
     try {
       msg = JSON.parse(message);
     } catch {
       return;
     }
-    const att = ws.deserializeAttachment() || {};
-    const role = att.role;
 
     switch (msg.type) {
       case 'ping':
@@ -376,7 +407,10 @@ export class Room {
     }
   }
 
-  webSocketClose(ws) {
+  webSocketClose(ws, code, reason) {
+    // A socket we intentionally evicted on reconnect (same nonce) — don't tell the
+    // peer someone left; the client is just refreshing and reclaiming its slot.
+    if (reason === 'reconnected') return;
     const att = ws.deserializeAttachment() || {};
     const peer = this.ctx.getWebSockets(att.role === 'host' ? 'guest' : 'host')[0];
     if (peer && peer.readyState === 1)

@@ -14,6 +14,18 @@ let ws, peer;
 let myRole      = null;
 let peerJoined  = false;   // has the other participant joined the room?
 let pendingSignals = [];   // signals that arrived before the peer was constructed
+let connStatsTimer = null; // polls getStats() to keep the connection-type badge live
+
+// WS relay fallback (Pro) — live audio via the Durable Object when WebRTC can't connect
+let authMode       = 'off';   // 'off' | 'prelaunch' | 'live' (from /api/config)
+let roomEntitled   = false;   // Pro entitlement for this room (from /api/turn-credentials)
+let relayMode      = false;   // live audio currently flowing over the WS relay
+let relayRecorder  = null;    // MediaRecorder capturing local mic for relay
+let relayMS        = null;    // MediaSource for playing the peer's relayed audio
+let relaySB        = null;    // its SourceBuffer
+const relayQueue   = [];      // pending incoming chunks awaiting append
+let relayConnectTimer = null; // WebRTC-connect watchdog → falls back to relay
+const FORCE_RELAY  = new URLSearchParams(location.search).has('relay'); // test hook
 let clockOffset = 0;
 let syncSeq     = 0;
 let pingSamples = [];
@@ -328,6 +340,19 @@ function stopRecording() {
   document.getElementById('vox').classList.add('hidden');
 }
 
+// ─── Leave the room ───────────────────────────────────────────────────────────
+// Cleanly tears down the connection (frees the room slot; the peer gets peer-left)
+// and returns to the lobby.
+function exitRoom() {
+  if (hqRecorder && !confirm('Recording is in progress. Leave the room and discard it?')) return;
+  stopConnStats();
+  exitRelayMode();
+  try { peer && peer.destroy(); } catch { /* already gone */ }
+  peer = null;
+  try { ws && ws.close(1000, 'left'); } catch { /* ignore */ }
+  location.href = '/';
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 async function exportHQ(mime) {
   const blob = new Blob(hqChunks, { type: mime || 'audio/webm' });
@@ -388,7 +413,16 @@ function exportWhisperFiles() {
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWS(token) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}`);
+  // Per-tab nonce (survives refresh via sessionStorage) so the server reuses this
+  // client's slot on reconnect instead of rejecting it as a third peer ("Room is full").
+  let nonce = sessionStorage.getItem('ps-nonce');
+  if (!nonce) {
+    nonce = (crypto.randomUUID && crypto.randomUUID()) ||
+            (Date.now().toString(36) + Math.random().toString(16).slice(2));
+    sessionStorage.setItem('ps-nonce', nonce);
+  }
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}&nonce=${encodeURIComponent(nonce)}`);
+  ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
     log('Connected to signaling server');
@@ -397,6 +431,8 @@ function connectWS(token) {
   };
 
   ws.onmessage = ev => {
+    // A binary frame is relayed live audio from the peer (WS media fallback).
+    if (typeof ev.data !== 'string') { handleRelayAudio(ev.data); return; }
     const msg = JSON.parse(ev.data);
     switch (msg.type) {
       case 'role':
@@ -407,18 +443,24 @@ function connectWS(token) {
         if (myRole === 'host') document.getElementById('controls').classList.remove('hidden');
         break;
       case 'peer-joined':
-        log('Peer connected!', 'success');
-        setStatus('Peer connected', 'connected');
+        log('Peer joined — negotiating connection…', 'success');
+        setStatus('Connecting…', 'connecting');
         document.getElementById('controls').classList.remove('hidden');
         peerJoined = true;
+        // If we already have a peer, the other side just (re)connected (e.g. a page
+        // refresh) — tear down the stale connection so we renegotiate cleanly.
+        if (peer) { try { peer.destroy(); } catch { /* already gone */ } peer = null; pendingSignals = []; }
         if (!localStream) log('Click “Get Mic” to start the call', 'info');
         maybeInitPeer();
         break;
       case 'peer-left':
         log('Peer disconnected', 'warn');
-        setStatus('Peer disconnected', 'error');
+        setStatus('Peer disconnected', 'disconnected');
         peerJoined = false;
         pendingSignals = [];
+        stopConnStats();
+        clearTimeout(relayConnectTimer);
+        exitRelayMode();
         if (peer) { peer.destroy(); peer = null; }
         break;
       case 'signal':
@@ -462,8 +504,9 @@ async function getIceServers() {
     // (Pro) room gets real TURN; a free room transparently gets STUN-only.
     const qs = roomToken ? `?token=${encodeURIComponent(roomToken)}` : '';
     const res = await fetch(`/api/turn-credentials${qs}`);
-    const { iceServers } = await res.json();
-    if (Array.isArray(iceServers) && iceServers.length) return iceServers;
+    const body = await res.json();
+    roomEntitled = body.entitled === true;   // gates the WS relay fallback
+    if (Array.isArray(body.iceServers) && body.iceServers.length) return body.iceServers;
   } catch { /* fall through to STUN-only */ }
   return defaultIceServers();
 }
@@ -471,8 +514,129 @@ async function getIceServers() {
 // Create the peer connection only once BOTH sides are ready: the mic is live
 // AND the other participant has joined. Either can happen first, so this is
 // called from both getMic() and the 'peer-joined' handler.
-function maybeInitPeer() {
-  if (localStream && peerJoined && !peer) initPeer(myRole === 'host');
+async function maybeInitPeer() {
+  if (!(localStream && peerJoined && !peer)) return;
+  if (FORCE_RELAY) {                 // ?relay=1 test hook: skip WebRTC entirely
+    await getIceServers();           // resolves roomEntitled
+    enterRelayMode('forced (?relay=1)');
+    return;
+  }
+  initPeer(myRole === 'host');
+}
+
+// Inspect the live WebRTC connection and colour the badge by how media is flowing:
+//   green  = direct P2P (host/srflx candidate pair)
+//   cyan   = via TURN relay (either end is a 'relay' candidate)
+// Reads the selected ICE candidate pair from getStats().
+async function updateConnType() {
+  const pc = peer && peer._pc;
+  if (!pc || !peer.connected) return;
+  try {
+    const stats = await pc.getStats();
+    const pairs = new Map();
+    const cands = new Map();
+    let selectedId = null;
+    stats.forEach((r) => {
+      if (r.type === 'candidate-pair') pairs.set(r.id, r);
+      else if (r.type === 'local-candidate' || r.type === 'remote-candidate') cands.set(r.id, r);
+      else if (r.type === 'transport' && r.selectedCandidatePairId) selectedId = r.selectedCandidatePairId;
+    });
+    let pair = selectedId ? pairs.get(selectedId) : null;
+    if (!pair) {
+      for (const p of pairs.values()) {
+        if (p.selected || (p.nominated && p.state === 'succeeded')) { pair = p; break; }
+      }
+    }
+    if (!pair) return;
+    const relayed =
+      cands.get(pair.localCandidateId)?.candidateType === 'relay' ||
+      cands.get(pair.remoteCandidateId)?.candidateType === 'relay';
+    if (relayed) setStatus('Connected · via TURN relay', 'relay');
+    else         setStatus('Connected · direct (P2P)', 'direct');
+  } catch { /* stats unavailable — leave badge as-is */ }
+}
+
+function stopConnStats() {
+  if (connStatsTimer) { clearInterval(connStatsTimer); connStatsTimer = null; }
+}
+
+// ─── WS relay fallback (Pro) — live audio via the Durable Object ──────────────
+// Used only when WebRTC can't connect (ICE failed/timeout) in a Pro room. The
+// local mic is captured as small Opus/webm chunks and sent over the signaling WS
+// as binary frames; the DO forwards them to the peer, who plays them via
+// MediaSource. Local HQ/Whisper recording is unaffected (separate recorders).
+function enterRelayMode(reason) {
+  if (relayMode) return;
+  if (!roomEntitled) {
+    log('WebRTC unavailable — the server relay is a Pro feature', 'warn');
+    if (!(peer && peer.connected)) setStatus('Disconnected', 'disconnected');
+    return;
+  }
+  relayMode = true;
+  log(`Live media relay via server (WS) — ${reason}`, 'warn');
+  setStatus('Live relay (WS)', 'serverrelay');   // blue
+  startRelaySend();
+}
+
+function startRelaySend() {
+  if (relayRecorder || !localStream) return;
+  try {
+    const stream = new MediaStream([localStream.getAudioTracks()[0].clone()]);
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+    relayRecorder = new MediaRecorder(stream, { mimeType: mime || undefined, audioBitsPerSecond: 32000 });
+    relayRecorder.ondataavailable = async (e) => {
+      if (e.data && e.data.size && ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(await e.data.arrayBuffer()); } catch { /* frame dropped */ }
+      }
+    };
+    relayRecorder.start(250);   // 250ms chunks
+    log('Relaying local audio to peer via WS', 'info');
+  } catch (e) {
+    log(`Relay send failed: ${e.message}`, 'error');
+  }
+}
+
+// Incoming relayed audio chunk from the peer → append to a MediaSource for playback.
+function handleRelayAudio(buf) {
+  if (peer && peer.connected) return;   // WebRTC is up — ignore any stray relay audio
+  ensureRelayPlayback();
+  relayQueue.push(buf);
+  flushRelayQueue();
+}
+
+function ensureRelayPlayback() {
+  if (relayMS) return;
+  const audio = document.getElementById('remoteAudio');
+  relayMS = new MediaSource();
+  audio.srcObject = null;
+  audio.src = URL.createObjectURL(relayMS);
+  relayMS.addEventListener('sourceopen', () => {
+    try {
+      relaySB = relayMS.addSourceBuffer('audio/webm;codecs=opus');
+      relaySB.mode = 'sequence';
+      relaySB.addEventListener('updateend', flushRelayQueue);
+      flushRelayQueue();
+    } catch (e) {
+      log(`Relay playback init failed: ${e.message}`, 'error');
+    }
+  });
+  audio.play().catch(() => {});
+}
+
+function flushRelayQueue() {
+  if (!relaySB || relaySB.updating || !relayQueue.length) return;
+  try { relaySB.appendBuffer(relayQueue.shift()); } catch { /* retry on updateend */ }
+}
+
+function exitRelayMode() {
+  if (!relayMode && !relayRecorder && !relayMS) return;
+  relayMode = false;
+  try { if (relayRecorder && relayRecorder.state !== 'inactive') relayRecorder.stop(); } catch {}
+  relayRecorder = null;
+  try { if (relayMS && relayMS.readyState === 'open') relayMS.endOfStream(); } catch {}
+  relayMS = null; relaySB = null; relayQueue.length = 0;
+  const audio = document.getElementById('remoteAudio');
+  if (audio && audio.getAttribute('src')) { audio.removeAttribute('src'); try { audio.load(); } catch {} }
 }
 
 // ─── SimplePeer ───────────────────────────────────────────────────────────────
@@ -491,6 +655,11 @@ async function initPeer(initiator) {
 
   peer.on('connect', () => {
     log('P2P data channel open', 'success');
+    clearTimeout(relayConnectTimer);
+    exitRelayMode();                       // WebRTC won — tear down any WS relay
+    updateConnType();                      // green (direct) or cyan (TURN relay)
+    stopConnStats();
+    connStatsTimer = setInterval(updateConnType, 3000); // ICE can switch mid-call
     if (myRole === 'host') {
       sessionStart = serverNow();
       sendPeerMsg({ type: 'session-start', t: sessionStart });
@@ -513,9 +682,25 @@ async function initPeer(initiator) {
   });
 
   peer.on('data',  handleDataChannel);
-  peer.on('error', err => log(`Peer error: ${err.message}`, 'error'));
-  peer.on('close', ()  => log('P2P connection closed', 'warn'));
-  peer.on('iceStateChange', (state) => log(`ICE: ${state}`, 'info'));
+  peer.on('error', err => { log(`Peer error: ${err.message}`, 'error'); setStatus('Connection error', 'disconnected'); });
+  peer.on('close', ()  => {
+    log('P2P connection closed', 'warn');
+    stopConnStats();
+    clearTimeout(relayConnectTimer);
+    if (!relayMode) setStatus('Disconnected', 'disconnected');
+  });
+  peer.on('iceStateChange', (state) => {
+    log(`ICE: ${state}`, 'info');
+    if (state === 'new' || state === 'checking') { if (!relayMode) setStatus('Connecting…', 'connecting'); }
+    else if (state === 'connected' || state === 'completed') updateConnType();
+    else if (state === 'failed' || state === 'closed') {
+      stopConnStats();
+      if (roomEntitled) enterRelayMode(`ICE ${state}`);   // WebRTC dead → WS relay (Pro)
+      else if (!relayMode) setStatus('Disconnected', 'disconnected');
+    } else if (state === 'disconnected') {
+      if (!relayMode) setStatus('Reconnecting…', 'disconnected');
+    }
+  });
 
   // Flush any signals that arrived before this peer was constructed.
   if (pendingSignals.length) {
@@ -523,6 +708,13 @@ async function initPeer(initiator) {
     for (const s of pendingSignals) peer.signal(s);
     pendingSignals = [];
   }
+
+  // Watchdog: if WebRTC never connects (blocked network), fall back to the WS
+  // relay for a Pro room.
+  clearTimeout(relayConnectTimer);
+  relayConnectTimer = setTimeout(() => {
+    if (peer && !peer.connected && !relayMode) enterRelayMode('WebRTC connection timed out');
+  }, 12000);
 }
 
 // ─── Peer messages ────────────────────────────────────────────────────────────
@@ -595,6 +787,7 @@ async function uploadToR2(blob, name, mime) {
     });
     if (!res.ok) throw new Error(`status ${res.status}`);
     sendPeerMsg({ type: 'blob-available', name, mime, size: blob.size });
+    setStatus('Server relay (recording)', 'serverrelay');   // blue
     log(`Uploaded ${name} to server relay — peer will fetch`, 'success');
   } catch (e) {
     log(`Server relay upload failed: ${e.message}`, 'error');
@@ -605,6 +798,7 @@ async function fetchBlobFromR2(name, mime) {
   if (!roomToken) return;
   try {
     log(`Fetching ${name} from server relay…`);
+    setStatus('Server relay (recording)', 'serverrelay');   // blue
     const res = await fetch(`/api/blob/${roomToken}/${encodeURIComponent(name)}`);
     if (!res.ok) throw new Error(`status ${res.status}`);
     const blob = await res.blob();
@@ -782,15 +976,15 @@ function waitForClerk(timeoutMs = 5000) {
 }
 
 async function initClerk() {
-  // Only surface the auth/billing UI when the Worker says billing is enabled
-  // (BILLING_ENABLED=true). Defaults off, so a public deploy stays free-only and
-  // never shows a checkout that can't succeed until production billing is live.
-  let billingEnabled = false;
+  // Auth UI only appears in 'prelaunch' or 'live' mode (AUTH_MODE on the Worker).
+  // 'off' (default) → no auth UI at all; a public deploy stays free-only with no
+  // payment surface. 'prelaunch' → sign-in only (no checkout; sign-in = entitled).
+  // 'live' → sign-in + Go Pro (entitlement requires the paid plan).
   try {
     const cfg = await fetch('/api/config').then((r) => r.json());
-    billingEnabled = !!cfg.billingEnabled;
-  } catch { /* default off — free tier only */ }
-  if (!billingEnabled) return;
+    authMode = cfg.authMode || 'off';
+  } catch { authMode = 'off'; }
+  if (authMode === 'off') return;
 
   const clerk = await waitForClerk();
   if (!clerk) return; // not configured — free tier only
@@ -807,11 +1001,35 @@ async function initClerk() {
     () => clerk.openSignIn({ afterSignInUrl: location.href }));
   document.getElementById('btnGoPro')?.addEventListener('click',
     () => openGoPro(clerk));
-  document.getElementById('btnProClose')?.addEventListener('click',
-    () => closeGoPro(clerk));
 
   renderClerk(clerk);
   clerk.addListener(() => renderClerk(clerk));
+
+  // The plan/entitlement lives in the session token's claims, which lag a billing
+  // change — so after closing the account/checkout UI the badge can be stale until
+  // a reload. Self-heal: force a fresh token (which updates the claims) and
+  // re-render on tab focus/visibility and a short interval.
+  const refreshEntitlement = async () => {
+    if (clerk.user) {
+      try { await clerk.session?.getToken({ skipCache: true }); } catch { /* keep cached */ }
+    }
+    renderClerk(clerk);
+  };
+  window.addEventListener('focus', refreshEntitlement);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshEntitlement(); });
+
+  // Instant refresh when a Clerk modal (account / checkout) is dismissed: watch for
+  // its DOM nodes (classes prefixed `cl-`) being removed, rather than waiting for
+  // the focus/interval fallback.
+  const clerkModalPresent = () => !!document.querySelector('[class*="cl-modal"]');
+  let clerkModalWasOpen = false;
+  new MutationObserver(() => {
+    const open = clerkModalPresent();
+    if (clerkModalWasOpen && !open) { refreshEntitlement(); hideBillingHint(); }  // modal closed
+    clerkModalWasOpen = open;
+  }).observe(document.body, { childList: true, subtree: true });
+
+  setInterval(refreshEntitlement, 30000);   // safety-net fallback
 }
 
 function hasPro(clerk) {
@@ -825,7 +1043,8 @@ function renderClerk(clerk) {
   const goPro    = document.getElementById('btnGoPro');
   const userBtn  = document.getElementById('userButton');
   const signedIn = !!clerk.user;
-  const pro      = signedIn && hasPro(clerk);
+  // In 'prelaunch', being signed in grants access (preview). In 'live' it needs the plan.
+  const entitled = signedIn && (authMode === 'prelaunch' || hasPro(clerk));
 
   if (signIn) signIn.classList.toggle('hidden', signedIn);
   if (userBtn) {
@@ -837,10 +1056,12 @@ function renderClerk(clerk) {
   }
   if (badge) {
     badge.classList.toggle('hidden', !signedIn);
-    badge.classList.toggle('pro', pro);
-    badge.textContent = pro ? 'Pro' : 'Free';
+    badge.classList.toggle('pro', entitled);
+    badge.textContent = !signedIn ? '' : (authMode === 'prelaunch' ? 'Preview' : (entitled ? 'Pro' : 'Free'));
   }
-  if (goPro) goPro.classList.toggle('hidden', pro); // already Pro → nothing to buy
+  // "Go Pro" (checkout) is shown ONLY in 'live' mode for a signed-in, not-yet-Pro
+  // user. In 'prelaunch' it's always hidden — no payment path exists.
+  if (goPro) goPro.classList.toggle('hidden', !(authMode === 'live' && signedIn && !entitled));
 }
 
 function openGoPro(clerk) {
@@ -848,32 +1069,25 @@ function openGoPro(clerk) {
     clerk.openSignIn({ afterSignInUrl: location.href });
     return;
   }
-  // Show Clerk's PricingTable in an OPAQUE full-page view (#proModal) — not a
-  // translucent overlay. That way Clerk's checkout drawer (card entry) opens over a
-  // plain page, exactly like sign-in did, and can't be masked by a backdrop of ours.
-  const modal = document.getElementById('proModal');
-  const host  = document.getElementById('pricingHost');
-  if (!modal || !host || typeof clerk.mountPricingTable !== 'function') {
-    clerk.openUserProfile(); // fallback if this Clerk build lacks PricingTable
-    return;
-  }
-  host.replaceChildren();
-  modal.classList.remove('hidden');
-  try {
-    clerk.mountPricingTable(host);
-  } catch (e) {
-    console.warn('PricingTable mount failed', e);
-    modal.classList.add('hidden');
-    clerk.openUserProfile();
-  }
+  // Open Clerk's OWN account/billing modal (Manage account → Billing → change
+  // plan). Mounting <PricingTable/> inside a custom overlay repeatedly left Clerk's
+  // checkout masked / non-interactive; Clerk's native modal layers correctly (it's
+  // the flow that works for managing the subscription).
+  clerk.openUserProfile();
+  showBillingHint();   // interim: point users at the Billing tab
 }
 
-function closeGoPro(clerk) {
-  const modal = document.getElementById('proModal');
-  const host  = document.getElementById('pricingHost');
-  try { clerk.unmountPricingTable?.(host); } catch { /* ignore */ }
-  if (host) host.replaceChildren();
-  modal?.classList.add('hidden');
+let billingHintTimer = null;
+function showBillingHint() {
+  const el = document.getElementById('billingHint');
+  if (!el) return;
+  el.classList.remove('hidden');
+  clearTimeout(billingHintTimer);
+  billingHintTimer = setTimeout(hideBillingHint, 60000);  // safety auto-hide
+}
+function hideBillingHint() {
+  clearTimeout(billingHintTimer);
+  document.getElementById('billingHint')?.classList.add('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -908,6 +1122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     navigator.mediaDevices.addEventListener?.('devicechange', populateDevices);
   document.getElementById('btnRecord').onclick   = startRecording;
   document.getElementById('btnStitch').onclick   = stitchRecordings;
+  document.getElementById('btnLeave').onclick    = exitRoom;
   document.getElementById('btnCopyLink').onclick = () => {
     navigator.clipboard.writeText(document.getElementById('shareLink').value);
     document.getElementById('btnCopyLink').textContent = 'Copied!';

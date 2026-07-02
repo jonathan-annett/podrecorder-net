@@ -48,8 +48,40 @@ bucket_name = "podcast-studio-recordings"
 # login (see requirePro / test/run.mjs). NEVER set this in production.
 #   wrangler secret put TEST_ENTITLE_SECRET      # or set in .dev.vars for `wrangler dev`
 #
-# BILLING_ENABLED — gates whether the client renders the auth/billing (sign-in /
-# Go Pro) UI at all. Defaults OFF: a public deploy stays free-only with no payment
-# surface, so visitors never hit a checkout that can't succeed. Set to "true" only
-# once PRODUCTION billing is live (prod Clerk pk_live_/sk_live_ + real Stripe):
-#   wrangler secret put BILLING_ENABLED          # value: true   (and in .dev.vars for local)
+# AUTH_MODE — 'off' | 'prelaunch' | 'live' (default 'off'):
+#   off       — no auth UI; everyone anonymous/free; no payment surface (prod default).
+#   prelaunch — sign-in only, NO checkout; being signed in = entitled. Lets you test
+#               all gated features (TURN/R2/WS relay) with a login and no payments.
+#   live      — sign-in + Go Pro; entitlement requires the paid `pro` plan.
+# At launch, flip prelaunch → live (needs prod Clerk pk_live_/sk_live_ + real Stripe).
+#   wrangler secret put AUTH_MODE                # value: prelaunch | live  (and in .dev.vars for local)
+
+# ── Staging environment ──────────────────────────────────────────────────────
+# A SEPARATE Worker (podcast-studio-staging.<subdomain>.workers.dev) for testing
+# over the internet WITHOUT touching production (podrecorder.net) — no custom-domain
+# route, its own DO namespace, shares the R2 bucket. `main` + compatibility_date
+# inherit from the top level; bindings must be redeclared per environment.
+#   Deploy:  wrangler deploy --env staging
+#   Secrets: wrangler secret put <NAME> --env staging
+[env.staging]
+name = "podcast-studio-staging"
+workers_dev = true
+# Do NOT inherit the top-level custom-domain route — staging must never claim
+# podrecorder.net. (Named envs inherit top-level `routes` unless overridden.)
+routes = []
+
+[env.staging.assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[env.staging.durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[[env.staging.r2_buckets]]
+binding = "RECORDINGS"
+bucket_name = "podcast-studio-recordings"

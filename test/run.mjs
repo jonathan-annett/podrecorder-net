@@ -52,11 +52,14 @@ function eq(a, b, msg) {
 }
 
 // ── WebSocket helper: buffers messages, lets tests await a given type ──
-function openWS(token) {
-  const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`);
+function openWS(token, nonce) {
+  const qs = `?token=${encodeURIComponent(token)}` + (nonce ? `&nonce=${encodeURIComponent(nonce)}` : '');
+  const ws = new WebSocket(`${WS_BASE}/ws${qs}`);
   const seen = [];
+  const binaries = [];
   const waiters = [];
-  ws.on('message', (data) => {
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) { binaries.push(data); return; }
     let msg;
     try {
       msg = JSON.parse(data.toString());
@@ -95,6 +98,16 @@ function openWS(token) {
     });
   ws.send$ = (obj) => ws.send(JSON.stringify(obj));
   ws.count = (type) => seen.filter((m) => m.type === type).length;
+  ws.binaryCount = () => binaries.length;
+  ws.waitForBinary = (timeout = 2000) =>
+    new Promise((resolve, reject) => {
+      const start = Date.now();
+      (function poll() {
+        if (binaries.length) return resolve(binaries[binaries.length - 1]);
+        if (Date.now() - start > timeout) return reject(new Error('no binary frame received'));
+        setTimeout(poll, 20);
+      })();
+    });
   return ws;
 }
 
@@ -410,12 +423,46 @@ await test('turn-credentials: entitled room reports entitled:true', async () => 
   eq(body.entitled, true, 'entitled room should be entitled:true');
 });
 
-await test('config exposes billingEnabled (true with BILLING_ENABLED in .dev.vars)', async () => {
+await test('config exposes a valid authMode', async () => {
   const res = await fetch(`${BASE}/api/config`);
   eq(res.status, 200);
   const body = await res.json();
-  eq(typeof body.billingEnabled, 'boolean', 'billingEnabled should be a boolean');
-  eq(body.billingEnabled, true, 'expected true from BILLING_ENABLED=true in .dev.vars');
+  assert(['off', 'prelaunch', 'live'].includes(body.authMode), `unexpected authMode: ${body.authMode}`);
+});
+
+await test('reconnect with the same nonce reuses the slot (refresh is not "room full")', async () => {
+  const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const a = openWS(t, 'nonce-a'); await a.opened; const aRole = await a.waitFor('role');
+  const b = openWS(t, 'nonce-b'); await b.opened; const bRole = await b.waitFor('role');
+  await a.waitFor('peer-joined');
+  eq(aRole.role, 'host'); eq(bRole.role, 'guest');
+
+  // Guest "refreshes": reconnect with the SAME nonce → reclaims the guest slot.
+  const b2 = openWS(t, 'nonce-b'); await b2.opened;
+  const b2msg = await b2.waitFor('role');   // 'role' (not 'error: Room is full')
+  eq(b2msg.role, 'guest', 'refreshed client should reclaim its slot, not be rejected');
+
+  a.close(); b.close(); b2.close(); await sleep(150);
+});
+
+await test('entitled room relays a binary frame between peers (WS media fallback)', async () => {
+  const t = await createEntitledRoom();
+  const a = openWS(t); await a.opened; await a.waitFor('role');
+  const b = openWS(t); await b.opened; await b.waitFor('role'); await a.waitFor('peer-joined');
+  a.send(Buffer.from([1, 2, 3, 4, 5]));
+  const got = await b.waitForBinary();
+  eq(got.length, 5, 'relayed binary frame length');
+  a.close(); b.close(); await sleep(150);
+});
+
+await test('free room drops binary frames (no server relay)', async () => {
+  const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const a = openWS(t); await a.opened; await a.waitFor('role');
+  const b = openWS(t); await b.opened; await b.waitFor('role'); await a.waitFor('peer-joined');
+  a.send(Buffer.from([1, 2, 3, 4, 5]));
+  await sleep(400);
+  eq(b.binaryCount(), 0, 'free room must not relay binary frames');
+  a.close(); b.close(); await sleep(150);
 });
 
 // ── Summary ──
