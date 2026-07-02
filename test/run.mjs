@@ -52,8 +52,8 @@ function eq(a, b, msg) {
 }
 
 // ── WebSocket helper: buffers messages, lets tests await a given type ──
-function openWS(token, nonce) {
-  const qs = `?token=${encodeURIComponent(token)}` + (nonce ? `&nonce=${encodeURIComponent(nonce)}` : '');
+function openWS(token, guid) {
+  const qs = `?token=${encodeURIComponent(token)}` + (guid ? `&guid=${encodeURIComponent(guid)}` : '');
   const ws = new WebSocket(`${WS_BASE}/ws${qs}`);
   const seen = [];
   const binaries = [];
@@ -96,6 +96,12 @@ function openWS(token, nonce) {
         },
       });
     });
+  ws.closed = false;
+  ws.closeReason = null;
+  ws.on('close', (code, reason) => {
+    ws.closed = true;
+    ws.closeReason = (reason && reason.toString()) || '';
+  });
   ws.send$ = (obj) => ws.send(JSON.stringify(obj));
   ws.count = (type) => seen.filter((m) => m.type === type).length;
   ws.binaryCount = () => binaries.length;
@@ -430,17 +436,18 @@ await test('config exposes a valid authMode', async () => {
   assert(['off', 'prelaunch', 'live'].includes(body.authMode), `unexpected authMode: ${body.authMode}`);
 });
 
-await test('reconnect with the same nonce reuses the slot (refresh is not "room full")', async () => {
+await test('reconnect with the same device GUID reuses the slot (refresh/multi-tab is not "room full")', async () => {
   const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
-  const a = openWS(t, 'nonce-a'); await a.opened; const aRole = await a.waitFor('role');
-  const b = openWS(t, 'nonce-b'); await b.opened; const bRole = await b.waitFor('role');
+  const a = openWS(t, 'dev-a'); await a.opened; const aRole = await a.waitFor('role');
+  const b = openWS(t, 'dev-b'); await b.opened; const bRole = await b.waitFor('role');
   await a.waitFor('peer-joined');
   eq(aRole.role, 'host'); eq(bRole.role, 'guest');
 
-  // Guest "refreshes": reconnect with the SAME nonce → reclaims the guest slot.
-  const b2 = openWS(t, 'nonce-b'); await b2.opened;
+  // Same GUID reconnects (refresh, or room reopened in another tab of that browser)
+  // → reclaims the guest slot rather than being rejected as a third participant.
+  const b2 = openWS(t, 'dev-b'); await b2.opened;
   const b2msg = await b2.waitFor('role');   // 'role' (not 'error: Room is full')
-  eq(b2msg.role, 'guest', 'refreshed client should reclaim its slot, not be rejected');
+  eq(b2msg.role, 'guest', 'same GUID reconnect should reclaim its slot');
 
   a.close(); b.close(); b2.close(); await sleep(150);
 });
@@ -463,6 +470,33 @@ await test('free room drops binary frames (no server relay)', async () => {
   await sleep(400);
   eq(b.binaryCount(), 0, 'free room must not relay binary frames');
   a.close(); b.close(); await sleep(150);
+});
+
+const claim = (guid, room) =>
+  fetch(`${BASE}/api/device/claim?guid=${encodeURIComponent(guid)}&token=${encodeURIComponent(room)}`, { method: 'POST' });
+
+await test('one session per device — same GUID joining a 2nd room evicts its 1st socket', async () => {
+  const roomA = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const roomB = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+
+  await claim('dev-x', roomA);                     // client claims before connecting
+  const a = openWS(roomA, 'dev-x'); await a.opened;
+  eq((await a.waitFor('role')).role, 'host');
+
+  // Same device GUID starts a session in a DIFFERENT room …
+  await claim('dev-x', roomB);
+  const b = openWS(roomB, 'dev-x'); await b.opened; await b.waitFor('role');
+
+  // … so its socket in room A must be evicted (superseded). NOTE: cross-DO WebSocket
+  // close isn't supported by local `wrangler dev` (miniflare) — verified on the edge.
+  if (/localhost|127\.0\.0\.1/.test(BASE)) {
+    console.log('      (edge-only: cross-DO socket eviction not testable on localhost/miniflare)');
+    a.close(); b.close(); await sleep(150); return;
+  }
+  await waitUntil(() => a.closed);
+  eq(a.closeReason, 'superseded', `room-A socket should be superseded, got "${a.closeReason}"`);
+
+  b.close(); await sleep(150);
 });
 
 // ── Summary ──

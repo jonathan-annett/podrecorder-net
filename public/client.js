@@ -26,6 +26,14 @@ let relaySB        = null;    // its SourceBuffer
 const relayQueue   = [];      // pending incoming chunks awaiting append
 let relayConnectTimer = null; // WebRTC-connect watchdog → falls back to relay
 const FORCE_RELAY  = new URLSearchParams(location.search).has('relay'); // test hook
+
+// Session identity: reconnect + single-session dedup
+let suppressReconnect = false; // don't auto-reconnect after a deliberate close/stand-down
+let reconnectAttempts = 0;     // backoff counter (reset on successful open)
+let reconnectTimer    = null;
+let clockSyncTimer    = null;  // guard so reconnects don't stack clock-sync intervals
+let stoodDown         = false; // this tab yielded to another session
+let bc                = null;  // BroadcastChannel for same-browser tab dedup
 let clockOffset = 0;
 let syncSeq     = 0;
 let pingSamples = [];
@@ -345,6 +353,7 @@ function stopRecording() {
 // and returns to the lobby.
 function exitRoom() {
   if (hqRecorder && !confirm('Recording is in progress. Leave the room and discard it?')) return;
+  suppressReconnect = true;
   stopConnStats();
   exitRelayMode();
   try { peer && peer.destroy(); } catch { /* already gone */ }
@@ -411,23 +420,39 @@ function exportWhisperFiles() {
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
-function connectWS(token) {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // Per-tab nonce (survives refresh via sessionStorage) so the server reuses this
-  // client's slot on reconnect instead of rejecting it as a third peer ("Room is full").
-  let nonce = sessionStorage.getItem('ps-nonce');
-  if (!nonce) {
-    nonce = (crypto.randomUUID && crypto.randomUUID()) ||
-            (Date.now().toString(36) + Math.random().toString(16).slice(2));
-    sessionStorage.setItem('ps-nonce', nonce);
+// Durable per-device id (localStorage → survives tab close / restart): the anchor
+// for reconnect and one-session-per-device. `?guid=` in the URL overrides it, which
+// lets two tabs of one browser act as distinct devices for testing.
+function deviceGuid() {
+  const override = new URLSearchParams(location.search).get('guid');
+  if (override) return override;
+  let g = localStorage.getItem('ps-guid');
+  if (!g) {
+    g = (crypto.randomUUID && crypto.randomUUID()) ||
+        (Date.now().toString(36) + Math.random().toString(16).slice(2));
+    localStorage.setItem('ps-guid', g);
   }
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}&nonce=${encodeURIComponent(nonce)}`);
+  return g;
+}
+
+async function connectWS(token) {
+  const guid = deviceGuid();
+  // Claim this device for the room first — one active session per device: evicts our
+  // socket in any OTHER room before we join here.
+  try {
+    await fetch(`/api/device/claim?guid=${encodeURIComponent(guid)}&token=${encodeURIComponent(token)}`,
+      { method: 'POST' });
+  } catch { /* best-effort */ }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}&guid=${encodeURIComponent(guid)}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
     log('Connected to signaling server');
+    reconnectAttempts = 0;
     doClockSync();
-    setInterval(doClockSync, CLOCK_SYNC_INTERVAL);
+    if (!clockSyncTimer) clockSyncTimer = setInterval(doClockSync, CLOCK_SYNC_INTERVAL);
+    announceActive();   // tell other tabs of this device to stand down
   };
 
   ws.onmessage = ev => {
@@ -482,7 +507,65 @@ function connectWS(token) {
     }
   };
 
-  ws.onclose = () => log('Signaling disconnected', 'warn');
+  ws.onclose = (ev) => {
+    log('Signaling disconnected', 'warn');
+    if (suppressReconnect) return;
+    // Superseded by another tab/device (or a same-room reconnect eviction) → yield.
+    if (ev.reason === 'superseded' || ev.reason === 'reconnected') {
+      standDown('This room was opened in another tab or on another device.');
+      return;
+    }
+    scheduleReconnect();   // network drop → reconnect; the GUID reclaims our slot
+  };
+}
+
+// ─── Session identity: reconnect + single-session dedup ───────────────────────
+function scheduleReconnect() {
+  if (!roomToken || suppressReconnect) return;
+  reconnectAttempts++;
+  const delay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 15000);
+  setStatus('Reconnecting…', 'disconnected');
+  log(`Reconnecting in ${Math.round(delay / 1000)}s…`, 'warn');
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => connectWS(roomToken), delay);
+}
+
+// This tab yields the session to another tab/device: tear down and show a notice.
+function standDown(message) {
+  if (stoodDown) return;
+  stoodDown = true;
+  suppressReconnect = true;
+  clearTimeout(reconnectTimer);
+  stopConnStats();
+  exitRelayMode();
+  try { peer && peer.destroy(); } catch { /* gone */ }
+  peer = null;
+  try { ws && ws.close(1000, 'left'); } catch { /* ignore */ }
+  showTakenOver(message);
+}
+
+function showTakenOver(message) {
+  const el = document.getElementById('takenOver');
+  if (!el) return;
+  const msg = document.getElementById('takenOverMsg');
+  if (msg && message) msg.textContent = message;
+  el.classList.remove('hidden');
+}
+
+// BroadcastChannel: instant same-browser dedup. A tab that becomes active announces
+// it; older tabs of the same device (same GUID) stand down immediately.
+function initBroadcast() {
+  if (bc || typeof BroadcastChannel === 'undefined') return;
+  bc = new BroadcastChannel('podrecorder');
+  bc.onmessage = (e) => {
+    if (e.data && e.data.type === 'took-over' && e.data.guid === deviceGuid()) {
+      standDown('This session was moved to another tab.');
+    }
+  };
+}
+function announceActive() {
+  initBroadcast();
+  try { bc && bc.postMessage({ type: 'took-over', guid: deviceGuid() }); } catch { /* ignore */ }
 }
 
 function sendPeerMsg(data) {
@@ -941,6 +1024,7 @@ async function init() {
   document.getElementById('roomToken').textContent = token;
   document.getElementById('shareLink').value       = location.href;
 
+  initBroadcast();   // listen for a same-device tab taking over, even before we connect
   connectWS(token);
 }
 
@@ -1123,6 +1207,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btnRecord').onclick   = startRecording;
   document.getElementById('btnStitch').onclick   = stitchRecordings;
   document.getElementById('btnLeave').onclick    = exitRoom;
+  document.getElementById('btnUseHere').onclick  = () => location.reload();
   document.getElementById('btnCopyLink').onclick = () => {
     navigator.clipboard.writeText(document.getElementById('shareLink').value);
     document.getElementById('btnCopyLink').textContent = 'Copied!';

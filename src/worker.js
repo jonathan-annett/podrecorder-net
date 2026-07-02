@@ -98,6 +98,23 @@ export default {
       return stub.fetch(request);
     }
 
+    // One active session per device. The client calls this BEFORE opening the WS, so
+    // the DO→DO coordination (evict this GUID's socket in any OTHER room) runs in a
+    // plain request context — never inside a WebSocket-upgrade path.
+    if (pathname === '/api/device/claim') {
+      const guid = url.searchParams.get('guid');
+      const room = url.searchParams.get('token');
+      if (guid && room && env.DEVICES) {
+        await env.DEVICES.get(env.DEVICES.idFromName(guid))
+          .fetch('https://device/claim', {
+            method: 'POST',
+            body: JSON.stringify({ room, guid }),
+          })
+          .catch(() => { /* best-effort */ });
+      }
+      return json({ ok: true });
+    }
+
     // Client-visible config: which auth mode is active (off | prelaunch | live).
     // Defaults 'off' so a public deploy stays free-only (no auth UI, no payment
     // surface). 'prelaunch' shows sign-in only (no checkout; sign-in = entitled);
@@ -299,6 +316,18 @@ export class Room {
       return Response.json({ exists: created != null, full: count >= 2, entitled });
     }
 
+    // Device DO asks us to evict a GUID's socket (it started a session elsewhere).
+    if (url.pathname === '/evict') {
+      const { guid } = await this.readJson(request);
+      if (guid) {
+        for (const s of this.ctx.getWebSockets()) {
+          const a = s.deserializeAttachment() || {};
+          if (a.guid === guid) { try { s.close(4001, 'superseded'); } catch { /* closing */ } }
+        }
+      }
+      return new Response('ok');
+    }
+
     if (request.headers.get('Upgrade') === 'websocket') {
       return this.handleUpgrade(request);
     }
@@ -308,7 +337,7 @@ export class Room {
 
   async handleUpgrade(request) {
     const created = await this.ctx.storage.get('created');
-    const nonce = new URL(request.url).searchParams.get('nonce') || null;
+    const guid = new URL(request.url).searchParams.get('guid') || null;
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
@@ -322,14 +351,15 @@ export class Room {
 
     if (created == null) return reject('Invalid room token');
 
-    // Reconnect handling: a live socket carrying the same client nonce (e.g. a page
-    // refresh in the same tab) is the SAME client — evict the stale socket and reuse
-    // its slot, instead of counting it as a third participant ("Room is full").
+    // Reconnect / single-session: a live socket carrying the same device GUID (a
+    // refresh, or the room reopened in another tab of the same browser) is the SAME
+    // device — evict the stale socket and reuse its slot, instead of counting it as
+    // a third participant ("Room is full").
     let role = null;
     const liveRoles = [];
     for (const s of this.ctx.getWebSockets()) {
       const a = s.deserializeAttachment() || {};
-      if (nonce && a.nonce === nonce) {
+      if (guid && a.guid === guid) {
         role = a.role || null;
         try { s.close(1000, 'reconnected'); } catch { /* already closing */ }
       } else if (a.role) {
@@ -343,7 +373,7 @@ export class Room {
     }
 
     this.ctx.acceptWebSocket(server, [role]);
-    server.serializeAttachment({ role, nonce });
+    server.serializeAttachment({ role, guid });
 
     server.send(JSON.stringify({ type: 'role', role, serverTime: Date.now() }));
 
@@ -408,8 +438,9 @@ export class Room {
   }
 
   webSocketClose(ws, code, reason) {
-    // A socket we intentionally evicted on reconnect (same nonce) — don't tell the
-    // peer someone left; the client is just refreshing and reclaiming its slot.
+    // A socket we evicted for a same-room reconnect (same GUID) — don't tell the peer
+    // someone left; the client is just refreshing/reclaiming its slot. ('superseded'
+    // — the device moved to another room — DOES notify: the participant left here.)
     if (reason === 'reconnected') return;
     const att = ws.deserializeAttachment() || {};
     const peer = this.ctx.getWebSockets(att.role === 'host' ? 'guest' : 'host')[0];
@@ -431,5 +462,51 @@ export class Room {
       }
     }
     await this.ctx.storage.deleteAll();
+  }
+}
+
+// ── Device Durable Object ─────────────────────────────────────────────────────
+// One per client GUID. Enforces a single active session per device: when the device
+// joins a room, if it was in a DIFFERENT room, that room is told to evict the
+// device's socket. State is just the current room token.
+export class Device {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/claim') {
+      const body = await this.readJson(request);
+      const prev = await this.ctx.storage.get('room');
+      if (prev && body.room && prev !== body.room && body.guid) {
+        try {
+          await this.env.ROOMS.get(this.env.ROOMS.idFromName(prev)).fetch(
+            'https://room/evict',
+            { method: 'POST', body: JSON.stringify({ guid: body.guid }) },
+          );
+        } catch { /* previous room may be gone — best-effort */ }
+      }
+      if (body.room) await this.ctx.storage.put('room', body.room);
+      return new Response('ok');
+    }
+
+    if (url.pathname === '/release') {
+      await this.ctx.storage.delete('room');
+      return new Response('ok');
+    }
+
+    return new Response('not found', { status: 404 });
+  }
+
+  async readJson(request) {
+    try {
+      const t = await request.text();
+      return t ? JSON.parse(t) : {};
+    } catch {
+      return {};
+    }
   }
 }
