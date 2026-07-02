@@ -52,8 +52,8 @@ function eq(a, b, msg) {
 }
 
 // ── WebSocket helper: buffers messages, lets tests await a given type ──
-function openWS(token, nonce) {
-  const qs = `?token=${encodeURIComponent(token)}` + (nonce ? `&nonce=${encodeURIComponent(nonce)}` : '');
+function openWS(token, guid) {
+  const qs = `?token=${encodeURIComponent(token)}` + (guid ? `&guid=${encodeURIComponent(guid)}` : '');
   const ws = new WebSocket(`${WS_BASE}/ws${qs}`);
   const seen = [];
   const binaries = [];
@@ -430,17 +430,18 @@ await test('config exposes a valid authMode', async () => {
   assert(['off', 'prelaunch', 'live'].includes(body.authMode), `unexpected authMode: ${body.authMode}`);
 });
 
-await test('reconnect with the same nonce reuses the slot (refresh is not "room full")', async () => {
+await test('reconnect with the same device GUID reuses the slot (refresh/multi-tab is not "room full")', async () => {
   const t = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
-  const a = openWS(t, 'nonce-a'); await a.opened; const aRole = await a.waitFor('role');
-  const b = openWS(t, 'nonce-b'); await b.opened; const bRole = await b.waitFor('role');
+  const a = openWS(t, 'dev-a'); await a.opened; const aRole = await a.waitFor('role');
+  const b = openWS(t, 'dev-b'); await b.opened; const bRole = await b.waitFor('role');
   await a.waitFor('peer-joined');
   eq(aRole.role, 'host'); eq(bRole.role, 'guest');
 
-  // Guest "refreshes": reconnect with the SAME nonce → reclaims the guest slot.
-  const b2 = openWS(t, 'nonce-b'); await b2.opened;
+  // Same GUID reconnects (refresh, or room reopened in another tab of that browser)
+  // → reclaims the guest slot rather than being rejected as a third participant.
+  const b2 = openWS(t, 'dev-b'); await b2.opened;
   const b2msg = await b2.waitFor('role');   // 'role' (not 'error: Room is full')
-  eq(b2msg.role, 'guest', 'refreshed client should reclaim its slot, not be rejected');
+  eq(b2msg.role, 'guest', 'same GUID reconnect should reclaim its slot');
 
   a.close(); b.close(); b2.close(); await sleep(150);
 });

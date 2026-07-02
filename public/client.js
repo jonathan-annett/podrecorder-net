@@ -411,17 +411,24 @@ function exportWhisperFiles() {
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
+// Durable per-device id (localStorage → survives tab close / restart): the anchor
+// for reconnect and one-session-per-device. `?guid=` in the URL overrides it, which
+// lets two tabs of one browser act as distinct devices for testing.
+function deviceGuid() {
+  const override = new URLSearchParams(location.search).get('guid');
+  if (override) return override;
+  let g = localStorage.getItem('ps-guid');
+  if (!g) {
+    g = (crypto.randomUUID && crypto.randomUUID()) ||
+        (Date.now().toString(36) + Math.random().toString(16).slice(2));
+    localStorage.setItem('ps-guid', g);
+  }
+  return g;
+}
+
 function connectWS(token) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // Per-tab nonce (survives refresh via sessionStorage) so the server reuses this
-  // client's slot on reconnect instead of rejecting it as a third peer ("Room is full").
-  let nonce = sessionStorage.getItem('ps-nonce');
-  if (!nonce) {
-    nonce = (crypto.randomUUID && crypto.randomUUID()) ||
-            (Date.now().toString(36) + Math.random().toString(16).slice(2));
-    sessionStorage.setItem('ps-nonce', nonce);
-  }
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}&nonce=${encodeURIComponent(nonce)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${token}&guid=${encodeURIComponent(deviceGuid())}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {

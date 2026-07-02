@@ -308,7 +308,7 @@ export class Room {
 
   async handleUpgrade(request) {
     const created = await this.ctx.storage.get('created');
-    const nonce = new URL(request.url).searchParams.get('nonce') || null;
+    const guid = new URL(request.url).searchParams.get('guid') || null;
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
@@ -322,14 +322,15 @@ export class Room {
 
     if (created == null) return reject('Invalid room token');
 
-    // Reconnect handling: a live socket carrying the same client nonce (e.g. a page
-    // refresh in the same tab) is the SAME client — evict the stale socket and reuse
-    // its slot, instead of counting it as a third participant ("Room is full").
+    // Reconnect / single-session: a live socket carrying the same device GUID (a
+    // refresh, or the room reopened in another tab of the same browser) is the SAME
+    // device — evict the stale socket and reuse its slot, instead of counting it as
+    // a third participant ("Room is full").
     let role = null;
     const liveRoles = [];
     for (const s of this.ctx.getWebSockets()) {
       const a = s.deserializeAttachment() || {};
-      if (nonce && a.nonce === nonce) {
+      if (guid && a.guid === guid) {
         role = a.role || null;
         try { s.close(1000, 'reconnected'); } catch { /* already closing */ }
       } else if (a.role) {
@@ -343,7 +344,7 @@ export class Room {
     }
 
     this.ctx.acceptWebSocket(server, [role]);
-    server.serializeAttachment({ role, nonce });
+    server.serializeAttachment({ role, guid });
 
     server.send(JSON.stringify({ type: 'role', role, serverTime: Date.now() }));
 
