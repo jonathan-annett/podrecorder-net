@@ -340,6 +340,19 @@ function stopRecording() {
   document.getElementById('vox').classList.add('hidden');
 }
 
+// ─── Leave the room ───────────────────────────────────────────────────────────
+// Cleanly tears down the connection (frees the room slot; the peer gets peer-left)
+// and returns to the lobby.
+function exitRoom() {
+  if (hqRecorder && !confirm('Recording is in progress. Leave the room and discard it?')) return;
+  stopConnStats();
+  exitRelayMode();
+  try { peer && peer.destroy(); } catch { /* already gone */ }
+  peer = null;
+  try { ws && ws.close(1000, 'left'); } catch { /* ignore */ }
+  location.href = '/';
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 async function exportHQ(mime) {
   const blob = new Blob(hqChunks, { type: mime || 'audio/webm' });
@@ -1109,6 +1122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     navigator.mediaDevices.addEventListener?.('devicechange', populateDevices);
   document.getElementById('btnRecord').onclick   = startRecording;
   document.getElementById('btnStitch').onclick   = stitchRecordings;
+  document.getElementById('btnLeave').onclick    = exitRoom;
   document.getElementById('btnCopyLink').onclick = () => {
     navigator.clipboard.writeText(document.getElementById('shareLink').value);
     document.getElementById('btnCopyLink').textContent = 'Copied!';

@@ -1085,6 +1085,48 @@ with an identity.
 
 ---
 
+## Roadmap: Session identity & persistent connections
+
+### Motivation
+
+The per-tab `nonce` (sessionStorage) shipped in the WS-relay work only survives a
+refresh in the same tab. A durable **per-device identity** is needed to (a) enforce
+one active session per device, (b) survive tab-close / browser-restart / network
+switch, and (c) pair devices into couplets for reconnection.
+
+### Design
+
+- **Device GUID** — generated once, persisted (IndexedDB or localStorage), sent on
+  every `/ws` connect. **Replaces the per-tab nonce** as the signaling-level anchor.
+  (It's a signaling identity for slotting/pairing; WebRTC's SDP/ICE don't use it.)
+- **One active session per device (model integrity).** A device must not run two
+  sessions at once (no working around the 2-speaker cap). Because the GUID lives in
+  per-browser storage, duplicates only occur across tabs of the *same* browser:
+  - **BroadcastChannel** (client, instant): tabs of one browser share a channel; a
+    new session announcement kills/blocks any other tab already in a session —
+    before it connects. Handles the "emailed link opens another tab" case.
+  - **Per-GUID device Durable Object** (server, authoritative): joining any room
+    registers the GUID; if it was in another room, that Room DO evicts the socket
+    (reason `superseded`). Catches hung/backgrounded tabs (common on mobile) that
+    won't answer the channel. Old tab shows "moved to another session".
+  - Boundary: two *real* devices/browsers = different GUIDs = legitimately separate
+    participants, still capped at 2/room by the Room DO. We only prevent one device
+    holding multiple sessions.
+- **Reconnect / reslot by GUID** — on reconnect the Room DO re-slots the device into
+  its prior role (survives tab close / restart), evicting any stale socket. Couplet
+  state `{ hostGuid, guestGuid }` lives in the Room DO.
+- **WS auto-reconnect** — on `ws.onclose`, retry with backoff; the GUID silently
+  reclaims the slot → seamless network-switch/refresh recovery (addresses the
+  original "no reconnection" limitation).
+- **Exit vs. drop** — the Leave button (shipped) is an explicit exit: release the
+  device from the couplet (don't auto-reslot). A network drop keeps the device
+  eligible to reconnect.
+
+Client-only pieces (GUID, BroadcastChannel, auto-reconnect) + Room/device DO
+changes. No new secrets.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Description |
