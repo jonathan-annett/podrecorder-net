@@ -160,6 +160,29 @@
       0%, 100% { opacity: 1; }
       50%      { opacity: .5; }
     }
+
+    /* Single-active-session takeover notice. */
+    #takenOver {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483647;
+      background: rgba(12, 12, 14, .96);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .takenover-card {
+      text-align: center;
+      max-width: 360px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.6;
+    }
     .lobby-actions {
       display: flex;
       gap: 12px;
@@ -511,6 +534,15 @@
           Transfer: P2P data channel
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Shown when this session is taken over by another tab/device (one active
+       session per device). "Use here" reloads to reclaim it. -->
+  <div id="takenOver" class="hidden">
+    <div class="takenover-card">
+      <div id="takenOverMsg">This session was opened elsewhere.</div>
+      <button class="btn-primary" id="btnUseHere">Use here</button>
     </div>
   </div>
 

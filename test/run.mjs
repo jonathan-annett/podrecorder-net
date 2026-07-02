@@ -96,6 +96,12 @@ function openWS(token, guid) {
         },
       });
     });
+  ws.closed = false;
+  ws.closeReason = null;
+  ws.on('close', (code, reason) => {
+    ws.closed = true;
+    ws.closeReason = (reason && reason.toString()) || '';
+  });
   ws.send$ = (obj) => ws.send(JSON.stringify(obj));
   ws.count = (type) => seen.filter((m) => m.type === type).length;
   ws.binaryCount = () => binaries.length;
@@ -464,6 +470,33 @@ await test('free room drops binary frames (no server relay)', async () => {
   await sleep(400);
   eq(b.binaryCount(), 0, 'free room must not relay binary frames');
   a.close(); b.close(); await sleep(150);
+});
+
+const claim = (guid, room) =>
+  fetch(`${BASE}/api/device/claim?guid=${encodeURIComponent(guid)}&token=${encodeURIComponent(room)}`, { method: 'POST' });
+
+await test('one session per device — same GUID joining a 2nd room evicts its 1st socket', async () => {
+  const roomA = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+  const roomB = (await (await fetch(`${BASE}/api/create-room`)).json()).token;
+
+  await claim('dev-x', roomA);                     // client claims before connecting
+  const a = openWS(roomA, 'dev-x'); await a.opened;
+  eq((await a.waitFor('role')).role, 'host');
+
+  // Same device GUID starts a session in a DIFFERENT room …
+  await claim('dev-x', roomB);
+  const b = openWS(roomB, 'dev-x'); await b.opened; await b.waitFor('role');
+
+  // … so its socket in room A must be evicted (superseded). NOTE: cross-DO WebSocket
+  // close isn't supported by local `wrangler dev` (miniflare) — verified on the edge.
+  if (/localhost|127\.0\.0\.1/.test(BASE)) {
+    console.log('      (edge-only: cross-DO socket eviction not testable on localhost/miniflare)');
+    a.close(); b.close(); await sleep(150); return;
+  }
+  await waitUntil(() => a.closed);
+  eq(a.closeReason, 'superseded', `room-A socket should be superseded, got "${a.closeReason}"`);
+
+  b.close(); await sleep(150);
 });
 
 // ── Summary ──

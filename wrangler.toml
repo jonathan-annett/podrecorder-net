@@ -20,9 +20,19 @@ binding = "ASSETS"
 name = "ROOMS"
 class_name = "Room"
 
+# One Device DO per client GUID enforces one active session per device: joining any
+# room evicts the device's socket in any other room.
+[[durable_objects.bindings]]
+name = "DEVICES"
+class_name = "Device"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Device"]
 
 # Recording store-and-forward fallback when the P2P data channel can't complete.
 # Set a 24h lifecycle rule on the bucket (dashboard or `wrangler r2 bucket lifecycle`).
@@ -78,9 +88,17 @@ binding = "ASSETS"
 name = "ROOMS"
 class_name = "Room"
 
+[[env.staging.durable_objects.bindings]]
+name = "DEVICES"
+class_name = "Device"
+
 [[env.staging.migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[env.staging.migrations]]
+tag = "v2"
+new_sqlite_classes = ["Device"]
 
 [[env.staging.r2_buckets]]
 binding = "RECORDINGS"
